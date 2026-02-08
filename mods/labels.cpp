@@ -47,47 +47,81 @@ struct CStrRep
     char     utf8[1]; // variable-length
 };
 
-static void OverwriteCXStr(void* cxstr, const char* text)
+// ---------------------------------------------------------------------------
+// Game allocator — eqAlloc/eqFree use the EQ client's heap, matching
+// what CXStr's free-list system expects.
+// ---------------------------------------------------------------------------
+
+// Raw offsets for game allocator functions
+#define __eq_new_x     0x8DBB3B
+#define __eq_delete_x  0x8DB146
+
+using EqAllocFn = void*(*)(size_t);
+using EqFreeFn  = void(*)(void*);
+
+static EqAllocFn s_eqAlloc    = nullptr;
+static EqFreeFn  s_eqFree     = nullptr;
+static void*     s_gFreeLists = nullptr; // CXFreeList* — game's global free list array
+
+// ---------------------------------------------------------------------------
+// GameSetCXStr — properly set a CXStr's text using the game's allocator.
+//
+// This replaces the old OverwriteCXStr which used HeapAlloc(GetProcessHeap()).
+// The game's CXStr uses a custom free-list allocator; each CStrRep has a
+// freeList pointer back to the global free list.  When the game frees a
+// CStrRep via FreeRepNoLock, it dereferences that pointer.  If it's nullptr
+// (as HeapAlloc + HEAP_ZERO_MEMORY would set), it dereferences null while
+// holding the global CXStr mutex → exception → deadlock → freeze.
+//
+// By allocating with eqAlloc and setting freeList = gFreeLists, the game's
+// FreeRepNoLock can properly handle our CStrRep (return to pool or eqFree).
+// ---------------------------------------------------------------------------
+static void GameSetCXStr(void* cxstr, const char* text)
 {
     if (!cxstr || !text)
         return;
 
-    // CXStr is a pointer-to-CStrRep
     CStrRep** repPtr = reinterpret_cast<CStrRep**>(cxstr);
-    CStrRep* rep = *repPtr;
-    if (!rep)
+    CStrRep* oldRep = *repPtr;
+    if (!oldRep)
         return;
 
     uint32_t newLen = static_cast<uint32_t>(strlen(text));
 
-    if (rep->refCount == 1 && rep->alloc > newLen)
+    // Fast path: sole owner with enough buffer — overwrite in-place
+    if (oldRep->refCount == 1 && oldRep->alloc > newLen)
     {
-        // Fast path: sole owner with enough buffer — overwrite in-place
-        memcpy(rep->utf8, text, newLen + 1);
-        rep->length = newLen;
+        memcpy(oldRep->utf8, text, newLen + 1);
+        oldRep->length = newLen;
+        return;
     }
+
+    // Need game allocator for slow path
+    if (!s_eqAlloc || !s_eqFree || !s_gFreeLists)
+        return;
+
+    // Allocate new CStrRep on the game's heap
+    uint32_t newAlloc = newLen + 64; // extra room for future in-place writes
+    size_t allocSize = 0x14 + newAlloc; // CStrRep header (0x14) + utf8 data
+    CStrRep* newRep = static_cast<CStrRep*>(s_eqAlloc(allocSize));
+    if (!newRep)
+        return;
+
+    memset(newRep, 0, allocSize);
+    newRep->refCount = 1;
+    newRep->alloc    = newAlloc;
+    newRep->length   = newLen;
+    newRep->encoding = 0;
+    newRep->freeList = s_gFreeLists; // game's free list — critical for proper cleanup
+    memcpy(newRep->utf8, text, newLen + 1);
+
+    // Release old rep
+    if (oldRep->refCount <= 1)
+        s_eqFree(oldRep); // sole owner — free on game's heap
     else
-    {
-        // Shared or too small — allocate a new CStrRep on the process heap
-        uint32_t newAlloc = newLen + 64;
-        uint32_t allocSize = 0x14 + newAlloc;
-        CStrRep* newRep = static_cast<CStrRep*>(
-            HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, allocSize));
-        if (newRep)
-        {
-            newRep->refCount = 1;
-            newRep->alloc    = newAlloc;
-            newRep->length   = newLen;
-            newRep->encoding = 0;
-            newRep->freeList = nullptr;
-            memcpy(newRep->utf8, text, newLen + 1);
+        oldRep->refCount--; // shared — just release our reference
 
-            if (rep->refCount > 0)
-                rep->refCount--;
-
-            *repPtr = newRep;
-        }
-    }
+    *repPtr = newRep;
 }
 
 // ---------------------------------------------------------------------------
@@ -495,41 +529,9 @@ static void UpdateInventoryTitle()
 
         uint32_t newLen = static_cast<uint32_t>(strlen(title));
 
-        // Write the title into the CXStr, handling shared (refCount > 1) reps
-        CStrRep** repPtr = reinterpret_cast<CStrRep**>(s_cachedInvWnd + OFF_WindowText);
-        CStrRep* rep = *repPtr;
-
-        if (rep && rep->refCount == 1 && rep->alloc > newLen)
-        {
-            // Fast path: sole owner with enough buffer — overwrite in-place
-            memcpy(rep->utf8, title, newLen + 1);
-            rep->length = newLen;
-        }
-        else
-        {
-            // Shared or too small — allocate a new CStrRep on the process heap
-            // (game uses HeapAlloc/HeapFree for CXStr memory)
-            uint32_t newAlloc = newLen + 64; // extra space for future in-place overwrites
-            uint32_t allocSize = 0x14 + newAlloc; // CStrRep header + utf8 data
-            CStrRep* newRep = static_cast<CStrRep*>(
-                HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, allocSize));
-            if (newRep)
-            {
-                newRep->refCount = 1;
-                newRep->alloc    = newAlloc;
-                newRep->length   = newLen;
-                newRep->encoding = 0;
-                newRep->freeList = nullptr;
-                memcpy(newRep->utf8, title, newLen + 1);
-
-                // Release our reference to the old rep (decrement refCount)
-                if (rep && rep->refCount > 0)
-                    rep->refCount--;
-
-                // Swap in our new rep
-                *repPtr = newRep;
-            }
-        }
+        // Write the title into the inventory window's CXStr
+        void* cxstrAddr = reinterpret_cast<void*>(s_cachedInvWnd + OFF_WindowText);
+        GameSetCXStr(cxstrAddr, title);
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
@@ -570,29 +572,7 @@ static int __cdecl GetLabelFromEQ_Detour(int EQType, void* cxstrOut, bool* p3, u
         {
             char buf[256];
             if (it->second(buf, sizeof(buf)))
-            {
-                OverwriteCXStr(cxstrOut, buf);
-
-                // One-time diagnostic logging for class label EQTypes
-                static bool s_logged1 = false, s_logged3 = false, s_logged4 = false;
-                if ((EQType == 1 && !s_logged1) || (EQType == 3 && !s_logged3) || (EQType == 4 && !s_logged4))
-                {
-                    LogFramework("LabelsOverride: EQType %d overwritten -> \"%s\"", EQType, buf);
-                    if (EQType == 1) s_logged1 = true;
-                    if (EQType == 3) s_logged3 = true;
-                    if (EQType == 4) s_logged4 = true;
-                }
-            }
-        }
-    }
-    else
-    {
-        // Log once that HasData() is false when class labels are requested
-        static bool s_noDataLogged = false;
-        if (!s_noDataLogged && (EQType == 1 || EQType == 3 || EQType == 4))
-        {
-            LogFramework("LabelsOverride: EQType %d requested but HasData()=false", EQType);
-            s_noDataLogged = true;
+                GameSetCXStr(cxstrOut, buf);
         }
     }
 
@@ -647,7 +627,7 @@ static int __cdecl GetGaugeValueFromEQ_Detour(int EQType, void* cxstrOut, bool* 
         // value into the CXStr output
         char buf[32];
         snprintf(buf, sizeof(buf), "%d", gaugeVal);
-        OverwriteCXStr(cxstrOut, buf);
+        GameSetCXStr(cxstrOut, buf);
     }
 
     return result;
@@ -883,6 +863,20 @@ bool LabelsOverride::Initialize()
 
     s_wndMgrPtrAddr = eqlib::FixEQGameOffset(pinstCXWndManager_x);
     LogFramework("LabelsOverride: pCXWndManager @ 0x%08X", static_cast<unsigned int>(s_wndMgrPtrAddr));
+
+    // Game allocator — eqAlloc/eqFree for CXStr-safe memory management
+    uintptr_t eqAllocAddr = static_cast<uintptr_t>(__eq_new_x)
+        - eqlib::EQGamePreferredAddress + EQGameBaseAddress;
+    s_eqAlloc = reinterpret_cast<EqAllocFn>(eqAllocAddr);
+    LogFramework("LabelsOverride: eqAlloc = 0x%08X", static_cast<unsigned int>(eqAllocAddr));
+
+    uintptr_t eqFreeAddr = static_cast<uintptr_t>(__eq_delete_x)
+        - eqlib::EQGamePreferredAddress + EQGameBaseAddress;
+    s_eqFree = reinterpret_cast<EqFreeFn>(eqFreeAddr);
+    LogFramework("LabelsOverride: eqFree = 0x%08X", static_cast<unsigned int>(eqFreeAddr));
+
+    s_gFreeLists = reinterpret_cast<void*>(eqlib::FixEQGameOffset(CXStr__gFreeLists_x));
+    LogFramework("LabelsOverride: gFreeLists = 0x%08X", static_cast<unsigned int>(reinterpret_cast<uintptr_t>(s_gFreeLists)));
 
     // --- Install hooks ---
     Hooks::Install("GetLabelFromEQ",
