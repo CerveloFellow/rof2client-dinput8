@@ -49,7 +49,11 @@ static FILE* g_frameworkLog = nullptr;
 static void OpenLog()
 {
     if (!g_frameworkLog)
+    {
+        // Force-delete any stale file from a previous crash, then create fresh
+        DeleteFileA("dinput8_proxy.log");
         fopen_s(&g_frameworkLog, "dinput8_proxy.log", "w");
+    }
 }
 
 void LogFramework(const char* fmt, ...)

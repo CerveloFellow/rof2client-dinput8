@@ -73,14 +73,15 @@ enum class eStatEntry : uint32_t
     SynergyLevel10 = 48,
     SynergyLevel11 = 49,
     SynergyLevel12 = 50,
-    Class1        = 51,
-    Class2        = 52,
-    Class3        = 53,
-    ClassCount    = 54,
-    Class1Level   = 55,
-    Class2Level   = 56,
-    Class3Level   = 57,
-    Max           = 58,
+    // IDs 51-55 are reserved/unused
+    Class1        = 56,
+    Class2        = 57,
+    Class3        = 58,
+    ClassCount    = 59,
+    Class1Level   = 60,
+    Class2Level   = 61,
+    Class3Level   = 62,
+    Max           = 63,
 };
 
 // ---------------------------------------------------------------------------
@@ -117,6 +118,7 @@ public:
 
     // Static query API — callable from any mod without an instance pointer
     static int64_t GetStat(eStatEntry stat);
+    static bool    HasStat(eStatEntry stat);
     static bool    IsClassless();
     static int     GetClassCount();
     static bool    HasData();

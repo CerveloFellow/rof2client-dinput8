@@ -41,6 +41,9 @@
     <ClInclude Include="mods\multiclass_data.h">
       <Filter>Header Files\mods</Filter>
     </ClInclude>
+    <ClInclude Include="mods\labels.h">
+      <Filter>Header Files\mods</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="dllmain.cpp">
@@ -53,6 +56,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="mods\multiclass_data.cpp">
+      <Filter>Source Files\mods</Filter>
+    </ClCompile>
+    <ClCompile Include="mods\labels.cpp">
       <Filter>Source Files\mods</Filter>
     </ClCompile>
     <ClCompile Include="pch.cpp">

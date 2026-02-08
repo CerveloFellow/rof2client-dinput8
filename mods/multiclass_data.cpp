@@ -100,6 +100,11 @@ int64_t MulticlassData::GetStat(eStatEntry stat)
     return 0;
 }
 
+bool MulticlassData::HasStat(eStatEntry stat)
+{
+    return s_stats.find(stat) != s_stats.end();
+}
+
 bool MulticlassData::IsClassless()
 {
     return GetStat(eStatEntry::Classless) == CLASSLESS_VALUE;
