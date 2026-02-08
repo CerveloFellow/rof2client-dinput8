@@ -68,15 +68,15 @@ bool MulticlassData::OnIncomingMessage(uint32_t opcode, const void* buffer, uint
     }
 
     // Parse entries into the stat map
+    LogFramework("MulticlassData: Received EdgeStat packet — %u entries, %u bytes", count, size);
     for (uint32_t i = 0; i < count; ++i)
     {
         auto key = static_cast<eStatEntry>(packet->entries[i].key);
         int64_t value = packet->entries[i].value;
         s_stats[key] = value;
+        LogFramework("  [%u] key=%u value=%lld", i, packet->entries[i].key, static_cast<long long>(value));
     }
     s_hasData = true;
-
-    LogFramework("MulticlassData: Received EdgeStat packet — %u entries", count);
 
     // Log multiclass summary
     int classCount = GetClassCount();

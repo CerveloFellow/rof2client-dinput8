@@ -53,18 +53,41 @@ static void OverwriteCXStr(void* cxstr, const char* text)
         return;
 
     // CXStr is a pointer-to-CStrRep
-    CStrRep* rep = *reinterpret_cast<CStrRep**>(cxstr);
+    CStrRep** repPtr = reinterpret_cast<CStrRep**>(cxstr);
+    CStrRep* rep = *repPtr;
     if (!rep)
         return;
 
     uint32_t newLen = static_cast<uint32_t>(strlen(text));
 
-    // Only overwrite if we own the buffer (refCount==1) and it's big enough
-    if (rep->refCount != 1 || rep->alloc <= newLen)
-        return;
+    if (rep->refCount == 1 && rep->alloc > newLen)
+    {
+        // Fast path: sole owner with enough buffer — overwrite in-place
+        memcpy(rep->utf8, text, newLen + 1);
+        rep->length = newLen;
+    }
+    else
+    {
+        // Shared or too small — allocate a new CStrRep on the process heap
+        uint32_t newAlloc = newLen + 64;
+        uint32_t allocSize = 0x14 + newAlloc;
+        CStrRep* newRep = static_cast<CStrRep*>(
+            HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, allocSize));
+        if (newRep)
+        {
+            newRep->refCount = 1;
+            newRep->alloc    = newAlloc;
+            newRep->length   = newLen;
+            newRep->encoding = 0;
+            newRep->freeList = nullptr;
+            memcpy(newRep->utf8, text, newLen + 1);
 
-    memcpy(rep->utf8, text, newLen + 1); // include null terminator
-    rep->length = newLen;
+            if (rep->refCount > 0)
+                rep->refCount--;
+
+            *repPtr = newRep;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -202,6 +225,25 @@ static bool FormatSynergy(char* buf, size_t sz, eStatEntry stat)
 // Class2/3 show blank " " when ClassCount < 2/3.
 static bool FormatClassLine(char* buf, size_t sz, int classNum)
 {
+    // One-time diagnostic: dump class-related stat values
+    static bool s_diagLogged = false;
+    if (!s_diagLogged && MulticlassData::HasData())
+    {
+        LogFramework("FormatClassLine diag: ClassCount=%d HasClass1=%d Class1=%lld Class1Level=%lld "
+            "HasClass2=%d Class2=%lld Class2Level=%lld HasClass3=%d Class3=%lld Class3Level=%lld",
+            MulticlassData::GetClassCount(),
+            MulticlassData::HasStat(eStatEntry::Class1),
+            static_cast<long long>(MulticlassData::GetStat(eStatEntry::Class1)),
+            static_cast<long long>(MulticlassData::GetStat(eStatEntry::Class1Level)),
+            MulticlassData::HasStat(eStatEntry::Class2),
+            static_cast<long long>(MulticlassData::GetStat(eStatEntry::Class2)),
+            static_cast<long long>(MulticlassData::GetStat(eStatEntry::Class2Level)),
+            MulticlassData::HasStat(eStatEntry::Class3),
+            static_cast<long long>(MulticlassData::GetStat(eStatEntry::Class3)),
+            static_cast<long long>(MulticlassData::GetStat(eStatEntry::Class3Level)));
+        s_diagLogged = true;
+    }
+
     // Read local player for fallback data
     uintptr_t pLocalPlayer = Memory::ReadMemory<uintptr_t>(s_localPlayerPtrAddr);
 
@@ -528,7 +570,29 @@ static int __cdecl GetLabelFromEQ_Detour(int EQType, void* cxstrOut, bool* p3, u
         {
             char buf[256];
             if (it->second(buf, sizeof(buf)))
+            {
                 OverwriteCXStr(cxstrOut, buf);
+
+                // One-time diagnostic logging for class label EQTypes
+                static bool s_logged1 = false, s_logged3 = false, s_logged4 = false;
+                if ((EQType == 1 && !s_logged1) || (EQType == 3 && !s_logged3) || (EQType == 4 && !s_logged4))
+                {
+                    LogFramework("LabelsOverride: EQType %d overwritten -> \"%s\"", EQType, buf);
+                    if (EQType == 1) s_logged1 = true;
+                    if (EQType == 3) s_logged3 = true;
+                    if (EQType == 4) s_logged4 = true;
+                }
+            }
+        }
+    }
+    else
+    {
+        // Log once that HasData() is false when class labels are requested
+        static bool s_noDataLogged = false;
+        if (!s_noDataLogged && (EQType == 1 || EQType == 3 || EQType == 4))
+        {
+            LogFramework("LabelsOverride: EQType %d requested but HasData()=false", EQType);
+            s_noDataLogged = true;
         }
     }
 
