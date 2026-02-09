@@ -11,6 +11,7 @@
 #include "hooks.h"
 #include "memory.h"
 #include "game_state.h"
+#include "commands.h"
 
 #include <eqlib/Offsets.h>
 #include <eqlib/offsets/eqgame.h>
@@ -126,6 +127,12 @@ static GroundItemDelete_t GroundItemDelete_Original = nullptr;
 using GroundItemClear_t = void(__fastcall*)(void* thisPtr, void* edx);
 static GroundItemClear_t GroundItemClear_Original = nullptr;
 
+// InterpretCmd — CEverQuest::InterpretCmd (thiscall, 2 params)
+// Called when the player enters a slash command.
+using InterpretCmd_t = void(__fastcall*)(void* thisPtr, void* edx,
+    void* pChar, const char* szFullLine);
+static InterpretCmd_t InterpretCmd_Original = nullptr;
+
 // ---------------------------------------------------------------------------
 // Detour implementations
 // ---------------------------------------------------------------------------
@@ -210,6 +217,14 @@ static void __fastcall GroundItemClear_Detour(
     GroundItemClear_Original(thisPtr, edx);
 }
 
+static void __fastcall InterpretCmd_Detour(
+    void* thisPtr, void* edx, void* pChar, const char* szFullLine)
+{
+    if (Commands::Dispatch(pChar, szFullLine))
+        return;  // Command handled by a registered handler
+    InterpretCmd_Original(thisPtr, edx, pChar, szFullLine);
+}
+
 // ---------------------------------------------------------------------------
 // Address resolution
 // ---------------------------------------------------------------------------
@@ -275,6 +290,11 @@ void Initialize()
     GroundItemClear_Original = reinterpret_cast<GroundItemClear_t>(giClrAddr);
     LogFramework("GroundItemClear = 0x%08X", static_cast<unsigned int>(giClrAddr));
 
+    // Resolve InterpretCmd address (slash command interpreter)
+    uintptr_t icAddr = eqlib::FixEQGameOffset(CEverQuest__InterpretCmd_x);
+    InterpretCmd_Original = reinterpret_cast<InterpretCmd_t>(icAddr);
+    LogFramework("InterpretCmd = 0x%08X", static_cast<unsigned int>(icAddr));
+
     // Initialize all mods before installing hooks
     for (auto& mod : s_mods)
     {
@@ -312,7 +332,11 @@ void Initialize()
         reinterpret_cast<void**>(&GroundItemClear_Original),
         reinterpret_cast<void*>(&GroundItemClear_Detour));
 
-    LogFramework("=== Framework initialized — 7 hooks installed ===");
+    Hooks::Install("InterpretCmd",
+        reinterpret_cast<void**>(&InterpretCmd_Original),
+        reinterpret_cast<void*>(&InterpretCmd_Detour));
+
+    LogFramework("=== Framework initialized — 8 hooks installed ===");
 }
 
 void Shutdown()
@@ -325,6 +349,9 @@ void Shutdown()
 
     // Remove hooks before shutting down mods
     Hooks::RemoveAll();
+
+    // Clear command registry
+    Commands::Shutdown();
 
     // Shutdown all mods
     for (auto& mod : s_mods)
