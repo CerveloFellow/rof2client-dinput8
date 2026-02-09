@@ -30,4 +30,19 @@ public:
     // Return true to allow the message through to the original handler,
     // return false to suppress it.
     virtual bool OnIncomingMessage(uint32_t opcode, const void* buffer, uint32_t size) = 0;
+
+    // Spawn tracking — called when the game adds/removes a spawn from the world
+    virtual void OnAddSpawn(void* pSpawn) {}
+    virtual void OnRemoveSpawn(void* pSpawn) {}
+
+    // Ground item tracking
+    virtual void OnAddGroundItem(void* pItem) {}
+    virtual void OnRemoveGroundItem(void* pItem) {}
+
+    // Game state transitions (e.g. zoning, char select)
+    virtual void OnSetGameState(int gameState) {}
+
+    // UI lifecycle — clean before zone, reload after
+    virtual void OnCleanUI() {}
+    virtual void OnReloadUI() {}
 };

@@ -10,6 +10,7 @@
 #include "core.h"
 #include "hooks.h"
 #include "memory.h"
+#include "game_state.h"
 
 #include <eqlib/Offsets.h>
 #include <eqlib/offsets/eqgame.h>
@@ -99,6 +100,32 @@ using HandleWorldMessage_t = unsigned char(__fastcall*)(void* thisPtr, void* edx
     void* connection, uint32_t opcode, char* buffer, uint32_t size);
 static HandleWorldMessage_t HandleWorldMessage_Original = nullptr;
 
+// CreatePlayer — PlayerManagerClient::CreatePlayer (thiscall, 8 params)
+// Called when a new spawn enters the world. We treat all params as opaque void*.
+using CreatePlayer_t = void*(__fastcall*)(void* thisPtr, void* edx,
+    void* buf, void* a, void* b, void* c, void* d, void* e, void* f, void* g);
+static CreatePlayer_t CreatePlayer_Original = nullptr;
+
+// PrepForDestroyPlayer — PlayerManagerBase::PrepForDestroyPlayer (thiscall, 1 param)
+// Called just before a spawn is removed from the world.
+using PrepForDestroyPlayer_t = void*(__fastcall*)(void* thisPtr, void* edx, void* spawn);
+static PrepForDestroyPlayer_t PrepForDestroyPlayer_Original = nullptr;
+
+// GroundItemAdd — EQGroundItemListManager::Add (thiscall, 1 param)
+// Called when a ground item is added to the world.
+using GroundItemAdd_t = void(__fastcall*)(void* thisPtr, void* edx, void* pItem);
+static GroundItemAdd_t GroundItemAdd_Original = nullptr;
+
+// GroundItemDelete — EQGroundItemListManager::Delete (thiscall, 1 param)
+// Called when a ground item is removed from the world.
+using GroundItemDelete_t = void(__fastcall*)(void* thisPtr, void* edx, void* pItem);
+static GroundItemDelete_t GroundItemDelete_Original = nullptr;
+
+// GroundItemClear — EQGroundItemListManager::Clear (thiscall, no params)
+// Called on zone change to remove all ground items.
+using GroundItemClear_t = void(__fastcall*)(void* thisPtr, void* edx);
+static GroundItemClear_t GroundItemClear_Original = nullptr;
+
 // ---------------------------------------------------------------------------
 // Detour implementations
 // ---------------------------------------------------------------------------
@@ -124,6 +151,63 @@ static unsigned char __fastcall HandleWorldMessage_Detour(
     }
 
     return HandleWorldMessage_Original(thisPtr, edx, connection, opcode, buffer, size);
+}
+
+static void* __fastcall CreatePlayer_Detour(
+    void* thisPtr, void* edx,
+    void* buf, void* a, void* b, void* c, void* d, void* e, void* f, void* g)
+{
+    void* result = CreatePlayer_Original(thisPtr, edx, buf, a, b, c, d, e, f, g);
+    if (result)
+    {
+        for (auto& mod : s_mods)
+            mod->OnAddSpawn(result);
+    }
+    return result;
+}
+
+static void* __fastcall PrepForDestroyPlayer_Detour(
+    void* thisPtr, void* edx, void* spawn)
+{
+    for (auto& mod : s_mods)
+        mod->OnRemoveSpawn(spawn);
+
+    return PrepForDestroyPlayer_Original(thisPtr, edx, spawn);
+}
+
+static void __fastcall GroundItemAdd_Detour(
+    void* thisPtr, void* edx, void* pItem)
+{
+    GroundItemAdd_Original(thisPtr, edx, pItem);
+
+    for (auto& mod : s_mods)
+        mod->OnAddGroundItem(pItem);
+}
+
+static void __fastcall GroundItemDelete_Detour(
+    void* thisPtr, void* edx, void* pItem)
+{
+    for (auto& mod : s_mods)
+        mod->OnRemoveGroundItem(pItem);
+
+    GroundItemDelete_Original(thisPtr, edx, pItem);
+}
+
+static void __fastcall GroundItemClear_Detour(
+    void* thisPtr, void* edx)
+{
+    // Walk the linked list before clearing: Top at offset 0x00, pNext at offset 0x04
+    void* current = *reinterpret_cast<void**>(thisPtr);
+    while (current)
+    {
+        void* next = *reinterpret_cast<void**>(
+            reinterpret_cast<uintptr_t>(current) + 0x04);
+        for (auto& mod : s_mods)
+            mod->OnRemoveGroundItem(current);
+        current = next;
+    }
+
+    GroundItemClear_Original(thisPtr, edx);
 }
 
 // ---------------------------------------------------------------------------
@@ -155,6 +239,9 @@ void Initialize()
     LogFramework("=== Framework initializing ===");
     LogFramework("EQGameBaseAddress = 0x%08X", static_cast<unsigned int>(EQGameBaseAddress));
 
+    // Resolve game global pointers (must come after InitBaseAddress)
+    GameState::ResolveGlobals();
+
     // Resolve ProcessGameEvents address using eqlib's FixEQGameOffset
     uintptr_t pgeAddr = eqlib::FixEQGameOffset(__ProcessGameEvents_x);
     ProcessGameEvents_Original = reinterpret_cast<ProcessGameEvents_t>(pgeAddr);
@@ -165,6 +252,28 @@ void Initialize()
         - eqlib::EQGamePreferredAddress + EQGameBaseAddress;
     HandleWorldMessage_Original = reinterpret_cast<HandleWorldMessage_t>(hwmAddr);
     LogFramework("HandleWorldMessage = 0x%08X", static_cast<unsigned int>(hwmAddr));
+
+    // Resolve spawn tracking hooks
+    uintptr_t cpAddr = eqlib::FixEQGameOffset(PlayerManagerClient__CreatePlayer_x);
+    CreatePlayer_Original = reinterpret_cast<CreatePlayer_t>(cpAddr);
+    LogFramework("CreatePlayer = 0x%08X", static_cast<unsigned int>(cpAddr));
+
+    uintptr_t pdpAddr = eqlib::FixEQGameOffset(PlayerManagerBase__PrepForDestroyPlayer_x);
+    PrepForDestroyPlayer_Original = reinterpret_cast<PrepForDestroyPlayer_t>(pdpAddr);
+    LogFramework("PrepForDestroyPlayer = 0x%08X", static_cast<unsigned int>(pdpAddr));
+
+    // Resolve ground item tracking hooks
+    uintptr_t giAddAddr = eqlib::FixEQGameOffset(EQGroundItemListManager__Add_x);
+    GroundItemAdd_Original = reinterpret_cast<GroundItemAdd_t>(giAddAddr);
+    LogFramework("GroundItemAdd = 0x%08X", static_cast<unsigned int>(giAddAddr));
+
+    uintptr_t giDelAddr = eqlib::FixEQGameOffset(EQGroundItemListManager__Delete_x);
+    GroundItemDelete_Original = reinterpret_cast<GroundItemDelete_t>(giDelAddr);
+    LogFramework("GroundItemDelete = 0x%08X", static_cast<unsigned int>(giDelAddr));
+
+    uintptr_t giClrAddr = eqlib::FixEQGameOffset(EQGroundItemListManager__Clear_x);
+    GroundItemClear_Original = reinterpret_cast<GroundItemClear_t>(giClrAddr);
+    LogFramework("GroundItemClear = 0x%08X", static_cast<unsigned int>(giClrAddr));
 
     // Initialize all mods before installing hooks
     for (auto& mod : s_mods)
@@ -183,7 +292,27 @@ void Initialize()
         reinterpret_cast<void**>(&HandleWorldMessage_Original),
         reinterpret_cast<void*>(&HandleWorldMessage_Detour));
 
-    LogFramework("=== Framework initialized — hooks installed ===");
+    Hooks::Install("CreatePlayer",
+        reinterpret_cast<void**>(&CreatePlayer_Original),
+        reinterpret_cast<void*>(&CreatePlayer_Detour));
+
+    Hooks::Install("PrepForDestroyPlayer",
+        reinterpret_cast<void**>(&PrepForDestroyPlayer_Original),
+        reinterpret_cast<void*>(&PrepForDestroyPlayer_Detour));
+
+    Hooks::Install("GroundItemAdd",
+        reinterpret_cast<void**>(&GroundItemAdd_Original),
+        reinterpret_cast<void*>(&GroundItemAdd_Detour));
+
+    Hooks::Install("GroundItemDelete",
+        reinterpret_cast<void**>(&GroundItemDelete_Original),
+        reinterpret_cast<void*>(&GroundItemDelete_Detour));
+
+    Hooks::Install("GroundItemClear",
+        reinterpret_cast<void**>(&GroundItemClear_Original),
+        reinterpret_cast<void*>(&GroundItemClear_Detour));
+
+    LogFramework("=== Framework initialized — 7 hooks installed ===");
 }
 
 void Shutdown()

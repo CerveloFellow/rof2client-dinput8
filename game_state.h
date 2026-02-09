@@ -1,0 +1,37 @@
+/**
+ * @file game_state.h
+ * @brief Centralized game global pointer resolution with typed getters.
+ * @date 2026-02-08
+ *
+ * @copyright Copyright (c) 2026
+ */
+
+#pragma once
+
+// Forward declarations — avoids pulling in heavy eqlib headers
+namespace eqlib {
+    class PlayerClient;
+    class PlayerManagerClient;
+    class PcClient;
+    class CDisplay;
+    class CXWndManager;
+    struct ZONEINFO;
+}
+
+namespace GameState
+{
+
+// Resolve all global addresses. Call once after InitBaseAddress().
+void ResolveGlobals();
+
+// Typed getters — return nullptr/null if the game pointer is not yet set.
+eqlib::PlayerClient*        GetLocalPlayer();
+eqlib::PlayerClient*        GetTarget();
+eqlib::PlayerClient*        GetControlledPlayer();
+eqlib::PlayerManagerClient* GetSpawnManager();
+eqlib::PcClient*            GetLocalPC();
+eqlib::CDisplay*            GetDisplay();
+eqlib::CXWndManager*        GetWndManager();
+eqlib::ZONEINFO*            GetZoneInfo();
+
+} // namespace GameState
