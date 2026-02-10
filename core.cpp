@@ -133,9 +133,27 @@ using InterpretCmd_t = void(__fastcall*)(void* thisPtr, void* edx,
     void* pChar, const char* szFullLine);
 static InterpretCmd_t InterpretCmd_Original = nullptr;
 
+// CleanGameUI — CDisplay::CleanGameUI (thiscall, no params)
+// Called when the UI is torn down (e.g. before zoning).
+using CleanGameUI_t = void(__fastcall*)(void* thisPtr, void* edx);
+static CleanGameUI_t CleanGameUI_Original = nullptr;
+
+// ReloadUI — CDisplay::ReloadUI (thiscall, 1 bool param)
+// Called when the UI is rebuilt (e.g. after zoning).
+using ReloadUI_t = void(__fastcall*)(void* thisPtr, void* edx, bool useIni);
+static ReloadUI_t ReloadUI_Original = nullptr;
+
+// dsp_chat — CEverQuest::dsp_chat (thiscall, 4 params)
+// NOT a hook — direct function pointer for calling into the game.
+using DspChat_t = void(__fastcall*)(void* thisPtr, void* edx,
+    const char* message, int color, bool allowLog, bool doPercentConversion);
+static DspChat_t DspChat_Func = nullptr;
+
 // ---------------------------------------------------------------------------
 // Detour implementations
 // ---------------------------------------------------------------------------
+
+static int s_lastGameState = -1;
 
 static int __cdecl ProcessGameEvents_Detour()
 {
@@ -143,6 +161,16 @@ static int __cdecl ProcessGameEvents_Detour()
 
     for (auto& mod : s_mods)
         mod->OnPulse();
+
+    // Track game state transitions
+    int gs = GameState::GetGameState();
+    if (gs != s_lastGameState)
+    {
+        LogFramework("Game state changed: %d -> %d", s_lastGameState, gs);
+        s_lastGameState = gs;
+        for (auto& mod : s_mods)
+            mod->OnSetGameState(gs);
+    }
 
     return result;
 }
@@ -220,9 +248,25 @@ static void __fastcall GroundItemClear_Detour(
 static void __fastcall InterpretCmd_Detour(
     void* thisPtr, void* edx, void* pChar, const char* szFullLine)
 {
-    if (Commands::Dispatch(pChar, szFullLine))
+    if (Commands::Dispatch(static_cast<eqlib::PlayerClient*>(pChar), szFullLine))
         return;  // Command handled by a registered handler
     InterpretCmd_Original(thisPtr, edx, pChar, szFullLine);
+}
+
+static void __fastcall CleanGameUI_Detour(void* thisPtr, void* edx)
+{
+    for (auto& mod : s_mods)
+        mod->OnCleanUI();
+
+    CleanGameUI_Original(thisPtr, edx);
+}
+
+static void __fastcall ReloadUI_Detour(void* thisPtr, void* edx, bool useIni)
+{
+    ReloadUI_Original(thisPtr, edx, useIni);
+
+    for (auto& mod : s_mods)
+        mod->OnReloadUI();
 }
 
 // ---------------------------------------------------------------------------
@@ -233,11 +277,49 @@ static void __fastcall InterpretCmd_Detour(
 #define CEverQuest__HandleWorldMessage_x  0x004C3250
 
 // ---------------------------------------------------------------------------
+// Chat output
+// ---------------------------------------------------------------------------
+
+void WriteChatColor(const char* line, int color)
+{
+    void* pEQ = static_cast<void*>(GameState::GetEverQuest());
+    if (pEQ && DspChat_Func)
+    {
+        DspChat_Func(pEQ, nullptr, line, color, true, false);
+    }
+    else
+    {
+        LogFramework("[Chat] %s", line);
+    }
+}
+
+void WriteChatf(const char* fmt, ...)
+{
+    char buf[512];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
+    WriteChatColor(buf);
+}
+
+// ---------------------------------------------------------------------------
 // Core implementation
 // ---------------------------------------------------------------------------
 
 namespace Core
 {
+
+void ExecuteCommand(const char* szCommand)
+{
+    if (!InterpretCmd_Original || !szCommand)
+        return;
+    void* pEQ = static_cast<void*>(GameState::GetEverQuest());
+    void* pChar = static_cast<void*>(GameState::GetControlledPlayer());
+    if (!pEQ || !pChar)
+        return;
+    InterpretCmd_Original(pEQ, nullptr, pChar, szCommand);
+}
 
 void RegisterMod(std::unique_ptr<IMod> mod)
 {
@@ -295,6 +377,21 @@ void Initialize()
     InterpretCmd_Original = reinterpret_cast<InterpretCmd_t>(icAddr);
     LogFramework("InterpretCmd = 0x%08X", static_cast<unsigned int>(icAddr));
 
+    // Resolve CleanGameUI address
+    uintptr_t cguiAddr = eqlib::FixEQGameOffset(CDisplay__CleanGameUI_x);
+    CleanGameUI_Original = reinterpret_cast<CleanGameUI_t>(cguiAddr);
+    LogFramework("CleanGameUI = 0x%08X", static_cast<unsigned int>(cguiAddr));
+
+    // Resolve ReloadUI address
+    uintptr_t ruiAddr = eqlib::FixEQGameOffset(CDisplay__ReloadUI_x);
+    ReloadUI_Original = reinterpret_cast<ReloadUI_t>(ruiAddr);
+    LogFramework("ReloadUI = 0x%08X", static_cast<unsigned int>(ruiAddr));
+
+    // Resolve dsp_chat address (direct call, not a hook)
+    uintptr_t dspAddr = eqlib::FixEQGameOffset(CEverQuest__dsp_chat_x);
+    DspChat_Func = reinterpret_cast<DspChat_t>(dspAddr);
+    LogFramework("dsp_chat = 0x%08X", static_cast<unsigned int>(dspAddr));
+
     // Initialize all mods before installing hooks
     for (auto& mod : s_mods)
     {
@@ -336,7 +433,15 @@ void Initialize()
         reinterpret_cast<void**>(&InterpretCmd_Original),
         reinterpret_cast<void*>(&InterpretCmd_Detour));
 
-    LogFramework("=== Framework initialized — 8 hooks installed ===");
+    Hooks::Install("CleanGameUI",
+        reinterpret_cast<void**>(&CleanGameUI_Original),
+        reinterpret_cast<void*>(&CleanGameUI_Detour));
+
+    Hooks::Install("ReloadUI",
+        reinterpret_cast<void**>(&ReloadUI_Original),
+        reinterpret_cast<void*>(&ReloadUI_Detour));
+
+    LogFramework("=== Framework initialized — 10 hooks installed ===");
 }
 
 void Shutdown()

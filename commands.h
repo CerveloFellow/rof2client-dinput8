@@ -8,8 +8,9 @@
 
 #pragma once
 
-// Command handler — void* pChar is an opaque PlayerClient pointer for now.
-using CommandHandler = void(*)(void* pChar, const char* szLine);
+namespace eqlib { class PlayerClient; }
+
+using CommandHandler = void(*)(eqlib::PlayerClient* pChar, const char* szLine);
 
 namespace Commands
 {
@@ -21,7 +22,7 @@ void AddCommand(const char* command, CommandHandler handler);
 void RemoveCommand(const char* command);
 
 // Called by InterpretCmd detour. Returns true if command was handled.
-bool Dispatch(void* pChar, const char* szFullLine);
+bool Dispatch(eqlib::PlayerClient* pChar, const char* szFullLine);
 
 // Clear the registry (called during Core::Shutdown).
 void Shutdown();

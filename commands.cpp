@@ -46,7 +46,7 @@ void RemoveCommand(const char* command)
     LogFramework("Command removed: /%s", name.c_str());
 }
 
-bool Dispatch(void* pChar, const char* szFullLine)
+bool Dispatch(eqlib::PlayerClient* pChar, const char* szFullLine)
 {
     if (!szFullLine)
         return false;

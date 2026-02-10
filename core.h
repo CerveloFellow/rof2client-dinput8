@@ -30,7 +30,14 @@ void Initialize();
 // Removes all hooks, then shuts down all mods.
 void Shutdown();
 
+// Execute a slash command as if the player typed it. Uses InterpretCmd internally.
+void ExecuteCommand(const char* szCommand);
+
 } // namespace Core
+
+// Write a message to the EQ chat window. Falls back to LogFramework if CEverQuest is unavailable.
+void WriteChatf(const char* fmt, ...);
+void WriteChatColor(const char* line, int color = 273);
 
 // Init thread entry point — polls for game window, then calls Core::Initialize().
 DWORD WINAPI InitThread(LPVOID lpParam);

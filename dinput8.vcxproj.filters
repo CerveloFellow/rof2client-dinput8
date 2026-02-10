@@ -15,6 +15,12 @@
     <Filter Include="Source Files\mods">
       <UniqueIdentifier>{A3B7C9D1-E5F2-4A6B-8C0D-2E4F6A8B0C1D}</UniqueIdentifier>
     </Filter>
+    <Filter Include="Header Files\mods\map">
+      <UniqueIdentifier>{C1D2E3F4-5A6B-7C8D-9E0F-1A2B3C4D5E6F}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\mods\map">
+      <UniqueIdentifier>{D2E3F4A5-6B7C-8D9E-0F1A-2B3C4D5E6F7A}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="framework.h">
@@ -53,6 +59,21 @@
     <ClInclude Include="commands.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="config.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="mq_compat.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="mods\map\map.h">
+      <Filter>Header Files\mods\map</Filter>
+    </ClInclude>
+    <ClInclude Include="mods\map\map_object.h">
+      <Filter>Header Files\mods\map</Filter>
+    </ClInclude>
+    <ClInclude Include="mods\map\map_mod.h">
+      <Filter>Header Files\mods\map</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="dllmain.cpp">
@@ -78,6 +99,21 @@
     </ClCompile>
     <ClCompile Include="commands.cpp">
       <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="config.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="mq_compat.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="mods\map\map_object.cpp">
+      <Filter>Source Files\mods\map</Filter>
+    </ClCompile>
+    <ClCompile Include="mods\map\map_api.cpp">
+      <Filter>Source Files\mods\map</Filter>
+    </ClCompile>
+    <ClCompile Include="mods\map\map_mod.cpp">
+      <Filter>Source Files\mods\map</Filter>
     </ClCompile>
     <ClCompile Include="pch.cpp">
       <Filter>Source Files</Filter>

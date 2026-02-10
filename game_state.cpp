@@ -24,6 +24,9 @@ static uintptr_t s_pLocalPC          = 0;
 static uintptr_t s_pDisplay          = 0;
 static uintptr_t s_pWndMgr           = 0;
 static uintptr_t s_pZoneInfo         = 0;
+static uintptr_t s_pEverQuest        = 0;
+static uintptr_t s_groundItemListMgrInstance = 0;
+static uintptr_t s_currentMapLabel   = 0;
 
 namespace GameState
 {
@@ -38,6 +41,9 @@ void ResolveGlobals()
     s_pDisplay          = eqlib::FixEQGameOffset(pinstCDisplay_x);
     s_pWndMgr           = eqlib::FixEQGameOffset(pinstCXWndManager_x);
     s_pZoneInfo         = eqlib::FixEQGameOffset(instEQZoneInfo_x);
+    s_pEverQuest        = eqlib::FixEQGameOffset(pinstCEverQuest_x);
+    s_groundItemListMgrInstance = eqlib::FixEQGameOffset(EQGroundItemListManager__Instance_x);
+    s_currentMapLabel   = eqlib::FixEQGameOffset(__CurrentMapLabel_x);
 
     LogFramework("GameState globals resolved:");
     LogFramework("  pLocalPlayer      = 0x%08X", static_cast<unsigned int>(s_pLocalPlayer));
@@ -48,6 +54,9 @@ void ResolveGlobals()
     LogFramework("  pDisplay          = 0x%08X", static_cast<unsigned int>(s_pDisplay));
     LogFramework("  pWndMgr           = 0x%08X", static_cast<unsigned int>(s_pWndMgr));
     LogFramework("  pZoneInfo         = 0x%08X", static_cast<unsigned int>(s_pZoneInfo));
+    LogFramework("  pEverQuest        = 0x%08X", static_cast<unsigned int>(s_pEverQuest));
+    LogFramework("  GroundItemMgr::Instance = 0x%08X", static_cast<unsigned int>(s_groundItemListMgrInstance));
+    LogFramework("  CurrentMapLabel   = 0x%08X", static_cast<unsigned int>(s_currentMapLabel));
 }
 
 // Double-pointer dereference: the offset points to a pointer-to-pointer in game memory.
@@ -100,6 +109,52 @@ eqlib::ZONEINFO* GetZoneInfo()
 {
     if (!s_pZoneInfo) return nullptr;
     return reinterpret_cast<eqlib::ZONEINFO*>(s_pZoneInfo);
+}
+
+eqlib::PlayerClient* GetSpawnList()
+{
+    eqlib::PlayerManagerClient* mgr = GetSpawnManager();
+    if (!mgr) return nullptr;
+    // PlayerManagerClient has a virtual destructor → vtable pointer at +0x00
+    // Then PlayerManagerBase members: NextID(+0x04), TList<PlayerClient>(+0x08)
+    // TList<T>::m_pFirstNode is at offset 0x00 within TList
+    // So FirstSpawn is at mgr + 0x08
+    return *reinterpret_cast<eqlib::PlayerClient**>(
+        reinterpret_cast<uintptr_t>(mgr) + 0x08);
+}
+
+CEverQuest* GetEverQuest()
+{
+    if (!s_pEverQuest) return nullptr;
+    return *reinterpret_cast<CEverQuest**>(s_pEverQuest);
+}
+
+int GetGameState()
+{
+    CEverQuest* pEQ = GetEverQuest();
+    if (!pEQ) return -1;
+    // CEverQuest::GameState is at offset 0x5c8 (from eqlib EverQuest.h)
+    return *reinterpret_cast<int*>(reinterpret_cast<uintptr_t>(pEQ) + 0x5c8);
+}
+
+EQGroundItem* GetGroundItemListTop()
+{
+    if (!s_groundItemListMgrInstance) return nullptr;
+
+    // EQGroundItemListManager::Instance() is a static __cdecl function
+    using InstanceFn = void*(__cdecl*)();
+    auto fn = reinterpret_cast<InstanceFn>(s_groundItemListMgrInstance);
+    void* mgr = fn();
+    if (!mgr) return nullptr;
+
+    // Top is the first member (offset 0x00) of the manager
+    return *reinterpret_cast<EQGroundItem**>(mgr);
+}
+
+MapViewLabel* GetCurrentMapLabel()
+{
+    if (!s_currentMapLabel) return nullptr;
+    return *reinterpret_cast<MapViewLabel**>(s_currentMapLabel);
 }
 
 } // namespace GameState

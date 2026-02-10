@@ -9,6 +9,10 @@
 #pragma once
 
 // Forward declarations — avoids pulling in heavy eqlib headers
+class CEverQuest;
+struct EQGroundItem;
+struct MapViewLabel;
+
 namespace eqlib {
     class PlayerClient;
     class PlayerManagerClient;
@@ -33,5 +37,17 @@ eqlib::PcClient*            GetLocalPC();
 eqlib::CDisplay*            GetDisplay();
 eqlib::CXWndManager*        GetWndManager();
 eqlib::ZONEINFO*            GetZoneInfo();
+eqlib::PlayerClient*        GetSpawnList();
+CEverQuest*                 GetEverQuest();
+
+// Read CEverQuest::GameState member (offset 0x5c8).
+// Returns -1 if CEverQuest instance is not yet available.
+int GetGameState();
+
+// Ground item list — calls EQGroundItemListManager::Instance() then reads Top.
+EQGroundItem*  GetGroundItemListTop();
+
+// Currently hovered map label (game global at __CurrentMapLabel_x).
+MapViewLabel*  GetCurrentMapLabel();
 
 } // namespace GameState
