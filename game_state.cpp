@@ -25,6 +25,7 @@ static uintptr_t s_pDisplay          = 0;
 static uintptr_t s_pWndMgr           = 0;
 static uintptr_t s_pZoneInfo         = 0;
 static uintptr_t s_pEverQuest        = 0;
+static uintptr_t s_pSidlMgr          = 0;
 static uintptr_t s_groundItemListMgrInstance = 0;
 static uintptr_t s_currentMapLabel   = 0;
 
@@ -42,6 +43,7 @@ void ResolveGlobals()
     s_pWndMgr           = eqlib::FixEQGameOffset(pinstCXWndManager_x);
     s_pZoneInfo         = eqlib::FixEQGameOffset(instEQZoneInfo_x);
     s_pEverQuest        = eqlib::FixEQGameOffset(pinstCEverQuest_x);
+    s_pSidlMgr          = eqlib::FixEQGameOffset(pinstCSidlManager_x);
     s_groundItemListMgrInstance = eqlib::FixEQGameOffset(EQGroundItemListManager__Instance_x);
     s_currentMapLabel   = eqlib::FixEQGameOffset(__CurrentMapLabel_x);
 
@@ -55,6 +57,7 @@ void ResolveGlobals()
     LogFramework("  pWndMgr           = 0x%08X", static_cast<unsigned int>(s_pWndMgr));
     LogFramework("  pZoneInfo         = 0x%08X", static_cast<unsigned int>(s_pZoneInfo));
     LogFramework("  pEverQuest        = 0x%08X", static_cast<unsigned int>(s_pEverQuest));
+    LogFramework("  pSidlMgr          = 0x%08X", static_cast<unsigned int>(s_pSidlMgr));
     LogFramework("  GroundItemMgr::Instance = 0x%08X", static_cast<unsigned int>(s_groundItemListMgrInstance));
     LogFramework("  CurrentMapLabel   = 0x%08X", static_cast<unsigned int>(s_currentMapLabel));
 }
@@ -135,6 +138,12 @@ int GetGameState()
     if (!pEQ) return -1;
     // CEverQuest::GameState is at offset 0x5c8 (from eqlib EverQuest.h)
     return *reinterpret_cast<int*>(reinterpret_cast<uintptr_t>(pEQ) + 0x5c8);
+}
+
+void* GetSidlManager()
+{
+    if (!s_pSidlMgr) return nullptr;
+    return *reinterpret_cast<void**>(s_pSidlMgr);
 }
 
 EQGroundItem* GetGroundItemListTop()

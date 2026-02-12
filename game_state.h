@@ -44,6 +44,9 @@ CEverQuest*                 GetEverQuest();
 // Returns -1 if CEverQuest instance is not yet available.
 int GetGameState();
 
+// CSidlManagerBase instance — needed by TargetInfo to find/create UI templates.
+void*          GetSidlManager();
+
 // Ground item list — calls EQGroundItemListManager::Instance() then reads Top.
 EQGroundItem*  GetGroundItemListTop();
 

@@ -74,6 +74,9 @@
     <ClInclude Include="mods\map\map_mod.h">
       <Filter>Header Files\mods\map</Filter>
     </ClInclude>
+    <ClInclude Include="mods\target_info.h">
+      <Filter>Header Files\mods</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="dllmain.cpp">
@@ -114,6 +117,9 @@
     </ClCompile>
     <ClCompile Include="mods\map\map_mod.cpp">
       <Filter>Source Files\mods\map</Filter>
+    </ClCompile>
+    <ClCompile Include="mods\target_info.cpp">
+      <Filter>Source Files\mods</Filter>
     </ClCompile>
     <ClCompile Include="pch.cpp">
       <Filter>Source Files</Filter>
