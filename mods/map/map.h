@@ -222,6 +222,9 @@ bool IsFloat(const std::string& in);
 // MapViewMap pointer management (set from PostDraw detour)
 void SetMapViewMap(void* ptr);
 
+// INI loading
+void LoadMapSettings();
+
 // API
 void MapInit();
 void MapClear();

@@ -532,6 +532,7 @@ namespace SpawnAccess
 
 eSpawnType GetSpawnType(SPAWNINFO* pSpawn);
 int GetBodyType(SPAWNINFO* pSpawn);
+void ClearBodyTypeCache();
 int ConColor(SPAWNINFO* pSpawn);
 uint32_t ConColorToARGB(int conColor);
 bool IsNamed(SPAWNINFO* pSpawn);

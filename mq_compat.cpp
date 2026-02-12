@@ -44,6 +44,7 @@
 #include <cctype>
 #include <algorithm>
 #include <charconv>
+#include <unordered_map>
 
 // ---------------------------------------------------------------------------
 // External definitions needed for function pointer resolution
@@ -316,25 +317,46 @@ static int GetBodyType_Inner(SPAWNINFO* pSpawn)
     return minProperty;
 }
 
-int GetBodyType(SPAWNINFO* pSpawn)
+// SEH-protected call — must be in a separate function from C++ objects
+// that require unwinding (std::unordered_map).
+static int GetBodyType_SEH(SPAWNINFO* pSpawn)
 {
-    if (!pSpawn)
-        return 0;
-
     __try
     {
         return GetBodyType_Inner(pSpawn);
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
-        static bool s_logged = false;
-        if (!s_logged)
+        static int s_exceptionCount = 0;
+        s_exceptionCount++;
+        if (s_exceptionCount <= 5)
         {
-            LogFramework("!!! GetBodyType EXCEPTION on spawn 0x%p — Properties offset may be wrong", pSpawn);
-            s_logged = true;
+            LogFramework("!!! GetBodyType EXCEPTION #%d on spawn 0x%p — Properties offset may be wrong",
+                s_exceptionCount, pSpawn);
         }
         return 0;
     }
+}
+
+static std::unordered_map<SPAWNINFO*, int> s_bodyTypeCache;
+
+void ClearBodyTypeCache()
+{
+    s_bodyTypeCache.clear();
+}
+
+int GetBodyType(SPAWNINFO* pSpawn)
+{
+    if (!pSpawn)
+        return 0;
+
+    auto it = s_bodyTypeCache.find(pSpawn);
+    if (it != s_bodyTypeCache.end())
+        return it->second;
+
+    int result = GetBodyType_SEH(pSpawn);
+    s_bodyTypeCache[pSpawn] = result;
+    return result;
 }
 
 // ---------------------------------------------------------------------------

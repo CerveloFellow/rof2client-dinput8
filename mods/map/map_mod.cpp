@@ -37,6 +37,7 @@ static int s_postDrawFrameCount = 0;
 static int s_postDrawFaultCooldown = 0;
 static bool s_firstRenderLogged = false;
 static bool s_needsRegenerate = false;  // set when map cleared due to zone transition
+static bool s_hadMapObjects = false;    // tracks populated→empty transition for zone detection
 
 static int PostDraw_MapLogic(void* thisPtr, void* edx)
 {
@@ -146,7 +147,27 @@ static int __fastcall PostDraw_Detour(void* thisPtr, void* edx)
 				MapClear();  // clear any objects added by OnAddSpawn during transition
 				MapGenerate();
 				s_needsRegenerate = false;
+				s_hadMapObjects = (gpActiveMapObjects != nullptr);
 				s_firstRenderLogged = false;
+			}
+
+			// Zone transition detection (alternate path): spawns may be removed
+			// one-by-one via PrepForDestroyPlayer BEFORE pLocalPlayer goes null.
+			// In that case the null-player check above never fires. Detect
+			// populated→empty transition and schedule a full regenerate.
+			if (gpActiveMapObjects)
+			{
+				s_hadMapObjects = true;
+			}
+			else if (s_hadMapObjects)
+			{
+				LogFramework("PostDraw: map depleted at frame %d — scheduling regenerate",
+					s_postDrawFrameCount);
+				s_needsRegenerate = true;
+				s_hadMapObjects = false;
+				// Don't regenerate this frame — spawns may still be loading.
+				// The s_needsRegenerate check above will fire next frame.
+				return PostDraw_Original(thisPtr, edx);
 			}
 
 			return PostDraw_MapLogic(thisPtr, edx);
@@ -198,13 +219,34 @@ bool MapMod::Initialize()
 			opt.Color = opt.DefaultColor;
 	}
 
-	LogFramework("MapMod initialized (11 hooks total: 10 framework + PostDraw)");
+	// Load persistent settings from INI (overrides defaults above)
+	LoadMapSettings();
+
+	// Register slash commands
+	Commands::AddCommand("/mapfilter", MapFilters);
+	Commands::AddCommand("/maphide", MapHideCmd);
+	Commands::AddCommand("/mapshow", MapShowCmd);
+	Commands::AddCommand("/highlight", MapHighlightCmd);
+	Commands::AddCommand("/mapnames", MapNames);
+	Commands::AddCommand("/mapclick", MapClickCommand);
+	Commands::AddCommand("/mapactivelayer", MapActiveLayerCmd);
+
+	LogFramework("MapMod initialized (11 hooks + 7 commands)");
 	return true;
 }
 
 void MapMod::Shutdown()
 {
 	LogFramework("MapMod::Shutdown");
+
+	// Remove slash commands
+	Commands::RemoveCommand("/mapfilter");
+	Commands::RemoveCommand("/maphide");
+	Commands::RemoveCommand("/mapshow");
+	Commands::RemoveCommand("/highlight");
+	Commands::RemoveCommand("/mapnames");
+	Commands::RemoveCommand("/mapclick");
+	Commands::RemoveCommand("/mapactivelayer");
 
 	s_mapRenderEnabled = false;
 	MapClear();
@@ -256,6 +298,7 @@ void MapMod::OnSetGameState(int gameState)
 		s_mapRenderEnabled = true;
 		s_postDrawFaultCooldown = 0;
 		s_needsRegenerate = false;
+		s_hadMapObjects = (gpActiveMapObjects != nullptr);
 		s_firstRenderLogged = false;
 	}
 	else
@@ -264,6 +307,7 @@ void MapMod::OnSetGameState(int gameState)
 		s_mapRenderEnabled = false;
 		MapClear();
 		m_mapActive = false;
+		s_hadMapObjects = false;
 	}
 }
 
@@ -273,6 +317,7 @@ void MapMod::OnCleanUI()
 	s_mapRenderEnabled = false;
 	MapClear();
 	m_mapActive = false;
+	s_hadMapObjects = false;
 }
 
 void MapMod::OnReloadUI()

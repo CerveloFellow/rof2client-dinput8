@@ -100,7 +100,7 @@ void MapInit()
 
 void MapClear()
 {
-
+	ClearBodyTypeCache();
 	MapObjects_Clear();
 
 	pLastTarget = nullptr;
@@ -164,9 +164,26 @@ void MapGenerate()
 		return;
 	}
 
+	// Diagnostic: log filter state
+	LogFramework("MapGenerate: filter state — All=%d PC=%d NPC=%d Named=%d Target=%d Corpse=%d NPCCorpse=%d PCCorpse=%d Pet=%d Mount=%d Untargetable=%d",
+		IsOptionEnabled(MapFilter::All) ? 1 : 0,
+		IsOptionEnabled(MapFilter::PC) ? 1 : 0,
+		IsOptionEnabled(MapFilter::NPC) ? 1 : 0,
+		IsOptionEnabled(MapFilter::Named) ? 1 : 0,
+		IsOptionEnabled(MapFilter::Target) ? 1 : 0,
+		IsOptionEnabled(MapFilter::Corpse) ? 1 : 0,
+		IsOptionEnabled(MapFilter::NPCCorpse) ? 1 : 0,
+		IsOptionEnabled(MapFilter::PCCorpse) ? 1 : 0,
+		IsOptionEnabled(MapFilter::Pet) ? 1 : 0,
+		IsOptionEnabled(MapFilter::Mount) ? 1 : 0,
+		IsOptionEnabled(MapFilter::Untargetable) ? 1 : 0);
+
 	int spawnCount = 0;
 	int spawnObjectCount = 0;
 	int groundCount = 0;
+	int typeCountPC = 0, typeCountNPC = 0, typeCountMount = 0, typeCountPet = 0;
+	int typeCountCorpse = 0, typeCountUntarget = 0, typeCountOther = 0;
+	int rejectedCount = 0;
 
 	SPAWNINFO* pSpawn = pSpawnList;
 	LogFramework("MapGenerate: pSpawnList=0x%p", pSpawn);
@@ -215,8 +232,23 @@ void MapGenerate()
 			spawnCount++;
 			if (spawnCount <= 5)
 				LogFramework("  Spawn %d: 0x%p name='%.20s'", spawnCount, pSpawn, SpawnAccess::GetName(pSpawn));
+
+			eSpawnType sType = GetSpawnType(pSpawn);
+			switch (sType) {
+			case PC: typeCountPC++; break;
+			case NPC: typeCountNPC++; break;
+			case MOUNT: typeCountMount++; break;
+			case PET: case PCPET: case NPCPET: typeCountPet++; break;
+			case CORPSE: case NPCCORPSE: case PCCORPSE: typeCountCorpse++; break;
+			case UNTARGETABLE: typeCountUntarget++; break;
+			default: typeCountOther++; break;
+			}
+
 			if (AddSpawn(pSpawn))
 				spawnObjectCount++;
+			else
+				rejectedCount++;
+
 			pSpawn = SpawnAccess::GetNext(pSpawn);
 		}
 	}
@@ -226,7 +258,9 @@ void MapGenerate()
 			spawnCount, GetExceptionCode(), pSpawn);
 	}
 
-	LogFramework("MapGenerate: spawn walk done — %d spawns, %d objects", spawnCount, spawnObjectCount);
+	LogFramework("MapGenerate: spawn walk done — %d spawns, %d objects, %d rejected", spawnCount, spawnObjectCount, rejectedCount);
+	LogFramework("MapGenerate: types — PC=%d NPC=%d Mount=%d Pet=%d Corpse=%d Untarget=%d Other=%d",
+		typeCountPC, typeCountNPC, typeCountMount, typeCountPet, typeCountCorpse, typeCountUntarget, typeCountOther);
 
 	if (IsOptionEnabled(MapFilter::Ground))
 	{
@@ -264,7 +298,14 @@ void MapGenerate()
 
 void MapUpdate()
 {
-	if (!pLocalPC) return;
+	static int s_updateCount = 0;
+
+	if (!pLocalPC)
+	{
+		if (s_updateCount == 0)
+			LogFramework("MapUpdate: pLocalPC is NULL — skipping");
+		return;
+	}
 	EnterMQ2Benchmark(bmMapRefresh);
 
 	SPAWNINFO* localPlayer = pLocalPlayer;
@@ -303,14 +344,17 @@ void MapUpdate()
 		}
 	}
 
+	int totalObjects = 0, removedObjects = 0;
 	MapObject* mapObject = gpActiveMapObjects;
 	while (mapObject)
 	{
+		totalObjects++;
 		bool forced = (mapObject == pOldLastTarget) && bTargetChanged;
 		mapObject->Update(forced);
 
 		if (!mapObject->CanDisplayObject())
 		{
+			removedObjects++;
 			MapObject* pNext = mapObject->GetNext();
 			RemoveMapObject(mapObject);
 			mapObject = pNext;
@@ -319,6 +363,14 @@ void MapUpdate()
 		{
 			mapObject = mapObject->GetNext();
 		}
+	}
+
+	s_updateCount++;
+	if (s_updateCount <= 5 || (removedObjects > 0 && s_updateCount % 300 == 0))
+	{
+		LogFramework("MapUpdate #%d: pLocalPC=0x%p total=%d removed=%d remaining=%d target=0x%p",
+			s_updateCount, (void*)pLocalPC, totalObjects, removedObjects,
+			totalObjects - removedObjects, (void*)target);
 	}
 
 	// Cast radius circle

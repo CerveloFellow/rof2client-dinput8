@@ -121,6 +121,9 @@
     <ClCompile Include="mods\target_info.cpp">
       <Filter>Source Files\mods</Filter>
     </ClCompile>
+    <ClCompile Include="mods\map\map_commands.cpp">
+      <Filter>Source Files\mods\map</Filter>
+    </ClCompile>
     <ClCompile Include="pch.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>

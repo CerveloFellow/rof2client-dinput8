@@ -763,6 +763,13 @@ void MapObjectSpawn::Update(bool forced)
 		SetText(FormatString(MapNameString));
 		SetColor(GetSpawnColor());
 	}
+	else if (m_text.empty())
+	{
+		// Name may not have been populated when spawn was first created
+		// (e.g. during zone loading). Retry until we get a non-empty name.
+		SetText(FormatString(MapNameString));
+		SetColor(GetSpawnColor());
+	}
 	else if (!m_highlight)
 	{
 		SetColor(GetSpawnColor());

@@ -125,6 +125,7 @@
     <ClCompile Include="mods\map\map_api.cpp" />
     <ClCompile Include="mods\map\map_mod.cpp" />
     <ClCompile Include="mods\target_info.cpp" />
+    <ClCompile Include="mods\map\map_commands.cpp" />
     <ClCompile Include="pch.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">Create</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">Create</PrecompiledHeader>
