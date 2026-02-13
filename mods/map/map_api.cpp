@@ -16,6 +16,9 @@
 #include "pch.h"
 #include "map_object.h"
 
+#include <eqlib/Offsets.h>
+#include <eqlib/offsets/eqgame.h>
+
 #include <sstream>
 
 // ---------------------------------------------------------------------------
@@ -31,6 +34,34 @@ static void* s_mapViewMap = nullptr;
 void SetMapViewMap(void* ptr)
 {
 	s_mapViewMap = ptr;
+}
+
+void* GetMapViewMapPtr()
+{
+	return s_mapViewMap;
+}
+
+// ---------------------------------------------------------------------------
+// Game function pointers (resolved once at init)
+// ---------------------------------------------------------------------------
+
+using GetWorldCoordinates_t = void(__thiscall*)(void* thisPtr, CVector3& worldCoords);
+static GetWorldCoordinates_t s_getWorldCoordinates = nullptr;
+
+void InitMapFunctions()
+{
+	s_getWorldCoordinates = reinterpret_cast<GetWorldCoordinates_t>(
+		eqlib::FixEQGameOffset(MapViewMap__GetWorldCoordinates_x));
+	LogFramework("InitMapFunctions: GetWorldCoordinates = 0x%08X",
+		static_cast<unsigned int>(reinterpret_cast<uintptr_t>(s_getWorldCoordinates)));
+}
+
+bool CallGetWorldCoordinates(void* mapViewMap, CVector3& worldCoords)
+{
+	if (!s_getWorldCoordinates || !mapViewMap)
+		return false;
+	s_getWorldCoordinates(mapViewMap, worldCoords);
+	return true;
 }
 
 static MapViewLine** GetGameLineListHead()
@@ -624,22 +655,133 @@ int MapShow(MQSpawnSearch& Search)
 }
 
 // ---------------------------------------------------------------------------
-// MapSelectTarget (simplified — no keyboard modifier support)
+// MapClickLocation — handle left-click on map
+// ---------------------------------------------------------------------------
+
+void MapClickLocation(float x, float y, float z)
+{
+	int modKeys = GetModifierKeys();
+	if (modKeys < 0 || modKeys >= MAX_CLICK_STRINGS)
+		return;
+
+	if (MapLeftClickString[modKeys][0] == 0)
+		return;
+
+	char szCommand[MAX_STRING];
+	strcpy_s(szCommand, MapLeftClickString[modKeys]);
+
+	// Substitute %x, %y, %z placeholders with world coordinates
+	char xBuf[64], yBuf[64], zBuf[64];
+	snprintf(xBuf, sizeof(xBuf), "%.2f", x);
+	snprintf(yBuf, sizeof(yBuf), "%.2f", y);
+	snprintf(zBuf, sizeof(zBuf), "%.2f", z);
+
+	char szOutput[MAX_STRING] = { 0 };
+	char* pOut = szOutput;
+	char* pEnd = szOutput + sizeof(szOutput) - 1;
+	for (const char* p = szCommand; *p && pOut < pEnd; )
+	{
+		if (*p == '%' && *(p + 1))
+		{
+			const char* sub = nullptr;
+			switch (*(p + 1))
+			{
+			case 'x': sub = xBuf; break;
+			case 'y': sub = yBuf; break;
+			case 'z': sub = zBuf; break;
+			}
+			if (sub)
+			{
+				size_t len = strlen(sub);
+				if (pOut + len < pEnd)
+				{
+					memcpy(pOut, sub, len);
+					pOut += len;
+				}
+				p += 2;
+				continue;
+			}
+		}
+		*pOut++ = *p++;
+	}
+	*pOut = 0;
+
+	EzCommand(szOutput);
+}
+
+// ---------------------------------------------------------------------------
+// MapSelectTarget — handle right-click on hovered map label
 // ---------------------------------------------------------------------------
 
 bool MapSelectTarget()
 {
 	MAPSPAWN* pMapSpawn = GetCurrentMapObject();
 	if (!pMapSpawn)
-		return true;
+		return false;
 
-	// TODO: ground item targeting not implemented (needs MQGroundSpawn)
+	SPAWNINFO* pSpawn = pMapSpawn->GetSpawn();
+	if (!pSpawn)
+		return false;
 
-	// For spawns, just set the target
-	// (pTarget is a macro for GameState::GetTarget(), can't assign through it)
-	// TODO: implement target setting via game function pointer
+	int modKeys = GetModifierKeys();
 
-	return IsOptionEnabled(MapFilter::TargetPath);
+	if (modKeys == 0)
+	{
+		// No modifiers — directly set target
+		GameState::SetTarget(pSpawn);
+		LogFramework("MapSelectTarget: targeted '%s' (id=%u)", SpawnAccess::GetName(pSpawn), SpawnAccess::GetSpawnID(pSpawn));
+	}
+	else if (modKeys > 0 && modKeys < MAX_CLICK_STRINGS
+		&& MapSpecialClickString[modKeys][0] != 0)
+	{
+		// With modifiers — substitute placeholders and execute command
+		char szCommand[MAX_STRING];
+		strcpy_s(szCommand, MapSpecialClickString[modKeys]);
+
+		const char* name = SpawnAccess::GetName(pSpawn);
+		char idBuf[32];
+		snprintf(idBuf, sizeof(idBuf), "%u", SpawnAccess::GetSpawnID(pSpawn));
+		char xBuf[64], yBuf[64], zBuf[64];
+		snprintf(xBuf, sizeof(xBuf), "%.2f", SpawnAccess::GetX(pSpawn));
+		snprintf(yBuf, sizeof(yBuf), "%.2f", SpawnAccess::GetY(pSpawn));
+		snprintf(zBuf, sizeof(zBuf), "%.2f", SpawnAccess::GetZ(pSpawn));
+
+		char szOutput[MAX_STRING] = { 0 };
+		char* pOut = szOutput;
+		char* pOutEnd = szOutput + sizeof(szOutput) - 1;
+		for (const char* p = szCommand; *p && pOut < pOutEnd; )
+		{
+			if (*p == '%' && *(p + 1))
+			{
+				const char* sub = nullptr;
+				switch (*(p + 1))
+				{
+				case 'n': sub = name; break;
+				case 'i': sub = idBuf; break;
+				case 'x': sub = xBuf; break;
+				case 'y': sub = yBuf; break;
+				case 'z': sub = zBuf; break;
+				}
+				if (sub)
+				{
+					size_t len = strlen(sub);
+					if (pOut + len < pOutEnd)
+					{
+						memcpy(pOut, sub, len);
+						pOut += len;
+					}
+					p += 2;
+					continue;
+				}
+			}
+			*pOut++ = *p++;
+		}
+		*pOut = 0;
+
+		EzCommand(szOutput);
+	}
+
+	return true;
 }
 
 // ---------------------------------------------------------------------------

@@ -64,6 +64,12 @@ struct CVector3
     float Z;
 };
 
+struct CXPoint
+{
+    int x;
+    int y;
+};
+
 union ARGBCOLOR
 {
     ARGBCOLOR() : ARGB(0) {}
@@ -592,6 +598,17 @@ inline void EzCommand(const char* szCommand)
 inline void DoCommand(SPAWNINFO* /*pChar*/, const char* szCommand)
 {
     Core::ExecuteCommand(szCommand);
+}
+
+// Returns a 4-bit bitmask of modifier keys currently held:
+// bit 0 (1) = Shift, bit 1 (2) = Ctrl, bit 2 (4) = Alt
+inline int GetModifierKeys()
+{
+    int mask = 0;
+    if (GetKeyState(VK_SHIFT) & 0x8000)   mask |= 1;
+    if (GetKeyState(VK_CONTROL) & 0x8000)  mask |= 2;
+    if (GetKeyState(VK_MENU) & 0x8000)     mask |= 4;
+    return mask;
 }
 
 // ---------------------------------------------------------------------------

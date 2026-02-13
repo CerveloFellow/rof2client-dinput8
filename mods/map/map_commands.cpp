@@ -739,6 +739,200 @@ char* FormatMarker(const char* szLine, char* szDest, size_t BufferSize)
 }
 
 // ---------------------------------------------------------------------------
+// MapSetLocationCmd — /maploc command handler
+// ---------------------------------------------------------------------------
+
+void MapSetLocationCmd(PlayerClient* pChar, const char* szLine)
+{
+	char szArg[MAX_STRING] = { 0 };
+	if (szLine && szLine[0])
+		GetArg(szArg, szLine, 1);
+
+	// /maploc help
+	if (!_stricmp(szArg, "help"))
+	{
+		MapLocSyntaxOutput();
+		return;
+	}
+
+	// /maploc remove [...]
+	if (!_stricmp(szArg, "remove"))
+	{
+		MapRemoveLocation(szLine);
+		return;
+	}
+
+	// Parse optional keywords: size, width, color, radius, rcolor, label, target, coords
+	MapLocParams params = gDefaultMapLocParams;
+	bool isCreatedFromDefaults = true;
+	bool useTarget = false;
+	bool hasCoords = false;
+	float locY = 0.f, locX = 0.f, locZ = 0.f;
+	std::string labelText;
+
+	int argIdx = 1;
+	const char* currentLine = szLine;
+
+	while (currentLine && *currentLine)
+	{
+		GetArg(szArg, currentLine, 1);
+		if (szArg[0] == 0) break;
+
+		if (!_stricmp(szArg, "size"))
+		{
+			currentLine = GetNextArg(currentLine);
+			GetArg(szArg, currentLine, 1);
+			float val = GetFloatFromString(szArg, params.lineSize);
+			if (val >= 1.f && val <= 200.f)
+			{
+				params.lineSize = val;
+				isCreatedFromDefaults = false;
+			}
+			currentLine = GetNextArg(currentLine);
+		}
+		else if (!_stricmp(szArg, "width"))
+		{
+			currentLine = GetNextArg(currentLine);
+			GetArg(szArg, currentLine, 1);
+			float val = GetFloatFromString(szArg, params.width);
+			if (val >= 1.f && val <= 10.f)
+			{
+				params.width = val;
+				isCreatedFromDefaults = false;
+			}
+			currentLine = GetNextArg(currentLine);
+		}
+		else if (!_stricmp(szArg, "color"))
+		{
+			currentLine = GetNextArg(currentLine);
+			char r[64], g[64], b[64];
+			GetArg(r, currentLine, 1);
+			GetArg(g, currentLine, 2);
+			GetArg(b, currentLine, 3);
+			params.color = MQColor(
+				static_cast<uint8_t>(std::clamp(GetIntFromString(r, 255), 0, 255)),
+				static_cast<uint8_t>(std::clamp(GetIntFromString(g, 0), 0, 255)),
+				static_cast<uint8_t>(std::clamp(GetIntFromString(b, 0), 0, 255)));
+			isCreatedFromDefaults = false;
+			currentLine = GetNextArg(currentLine, 3);
+		}
+		else if (!_stricmp(szArg, "radius"))
+		{
+			currentLine = GetNextArg(currentLine);
+			GetArg(szArg, currentLine, 1);
+			params.circleRadius = GetFloatFromString(szArg, 0.f);
+			isCreatedFromDefaults = false;
+			currentLine = GetNextArg(currentLine);
+		}
+		else if (!_stricmp(szArg, "rcolor"))
+		{
+			currentLine = GetNextArg(currentLine);
+			char r[64], g[64], b[64];
+			GetArg(r, currentLine, 1);
+			GetArg(g, currentLine, 2);
+			GetArg(b, currentLine, 3);
+			params.circleColor = MQColor(
+				static_cast<uint8_t>(std::clamp(GetIntFromString(r, 0), 0, 255)),
+				static_cast<uint8_t>(std::clamp(GetIntFromString(g, 0), 0, 255)),
+				static_cast<uint8_t>(std::clamp(GetIntFromString(b, 255), 0, 255)));
+			isCreatedFromDefaults = false;
+			currentLine = GetNextArg(currentLine, 3);
+		}
+		else if (!_stricmp(szArg, "label"))
+		{
+			// Everything after "label" is the label text
+			currentLine = GetNextArg(currentLine);
+			if (currentLine && *currentLine)
+				labelText = currentLine;
+			break;  // label consumes the rest of the line
+		}
+		else if (!_stricmp(szArg, "target"))
+		{
+			useTarget = true;
+			currentLine = GetNextArg(currentLine);
+		}
+		else if (IsFloat(szArg))
+		{
+			// Coordinates: yloc xloc [zloc]
+			locY = GetFloatFromString(szArg, 0.f);
+			currentLine = GetNextArg(currentLine);
+			GetArg(szArg, currentLine, 1);
+			if (IsFloat(szArg))
+			{
+				locX = GetFloatFromString(szArg, 0.f);
+				currentLine = GetNextArg(currentLine);
+				GetArg(szArg, currentLine, 1);
+				if (szArg[0] && IsFloat(szArg))
+				{
+					locZ = GetFloatFromString(szArg, 0.f);
+					currentLine = GetNextArg(currentLine);
+				}
+			}
+			hasCoords = true;
+		}
+		else
+		{
+			// Unrecognized argument
+			MapLocSyntaxOutput();
+			return;
+		}
+	}
+
+	// Determine position
+	CVector3 pos;
+	if (useTarget)
+	{
+		SPAWNINFO* targetSpawn = pTarget;
+		if (!targetSpawn)
+		{
+			WriteChatColor("No target selected.");
+			return;
+		}
+		pos.X = SpawnAccess::GetX(targetSpawn);
+		pos.Y = SpawnAccess::GetY(targetSpawn);
+		pos.Z = SpawnAccess::GetZ(targetSpawn);
+	}
+	else if (hasCoords)
+	{
+		pos.Y = locY;
+		pos.X = locX;
+		pos.Z = locZ;
+	}
+	else
+	{
+		// Default to player position
+		SPAWNINFO* localSpawn = pLocalPlayer;
+		if (!localSpawn)
+		{
+			WriteChatColor("Not in game.");
+			return;
+		}
+		pos.X = SpawnAccess::GetX(localSpawn);
+		pos.Y = SpawnAccess::GetY(localSpawn);
+		pos.Z = SpawnAccess::GetZ(localSpawn);
+	}
+
+	// Build tag from truncated integer coords
+	char tag[MAX_STRING];
+	snprintf(tag, sizeof(tag), "%d,%d,%d",
+		static_cast<int>(pos.Y), static_cast<int>(pos.X), static_cast<int>(pos.Z));
+
+	// Create and add the map loc
+	auto mapLoc = std::make_unique<MapLocTemplate>(
+		params, labelText, tag, pos, isCreatedFromDefaults);
+
+	int index = static_cast<int>(gMapLocTemplates.size());
+	WriteChatf("MapLoc %d added at %s: size=%.0f, width=%.0f, color=%d,%d,%d, radius=%.0f%s",
+		index, tag,
+		params.lineSize, params.width,
+		(int)params.color.Red, (int)params.color.Green, (int)params.color.Blue,
+		params.circleRadius,
+		labelText.empty() ? "" : (std::string(", label=") + labelText).c_str());
+
+	AddMapLoc(std::move(mapLoc));
+}
+
+// ---------------------------------------------------------------------------
 // LoadMapSettings — load all persistent settings from INI
 // ---------------------------------------------------------------------------
 

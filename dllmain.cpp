@@ -84,7 +84,7 @@ BOOL WINAPI DllMain(HMODULE hModule, DWORD dwReason, LPVOID lpReserved)
         // Core::RegisterMod(std::make_unique<LabelsOverride>());
         // Core::RegisterMod(std::make_unique<SpellbookUnlock>());
         Core::RegisterMod(std::make_unique<MapMod>());
-        // Core::RegisterMod(std::make_unique<TargetInfoMod>());
+        Core::RegisterMod(std::make_unique<TargetInfoMod>());
 
         // Launch framework init thread — waits for game window, then hooks
         CreateThread(NULL, 0, &InitThread, NULL, 0, NULL);

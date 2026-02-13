@@ -240,6 +240,10 @@ void MapLocSyntaxOutput();
 void MapRemoveLocation(const char* szLine);
 
 bool MapSelectTarget();
+void MapClickLocation(float x, float y, float z);
+bool CallGetWorldCoordinates(void* mapViewMap, CVector3& worldCoords);
+void InitMapFunctions();
+void* GetMapViewMapPtr();
 
 MapObject* AddSpawn(SPAWNINFO* pNewSpawn, bool ExplicitAllow = false);
 bool RemoveSpawn(SPAWNINFO* pSpawn);

@@ -27,11 +27,20 @@
 extern "C" uintptr_t EQGameBaseAddress;
 
 // ---------------------------------------------------------------------------
-// PostDraw hook — MapUpdate + label/line splice for rendering
+// Vtable hook typedefs
 // ---------------------------------------------------------------------------
 
 using PostDraw_t = int(__fastcall*)(void* thisPtr, void* edx);
+using HandleLButtonDown_t = int(__fastcall*)(void* thisPtr, void* edx, const CXPoint& pos, uint32_t flags);
+using HandleRButtonDown_t = int(__fastcall*)(void* thisPtr, void* edx, const CXPoint& pos, uint32_t flags);
+
 static PostDraw_t PostDraw_Original = nullptr;
+static HandleLButtonDown_t HandleLButtonDown_Original = nullptr;
+static HandleRButtonDown_t HandleRButtonDown_Original = nullptr;
+
+// ---------------------------------------------------------------------------
+// PostDraw hook — MapUpdate + label/line splice for rendering
+// ---------------------------------------------------------------------------
 
 static bool s_mapRenderEnabled = false;
 static int s_postDrawFrameCount = 0;
@@ -179,12 +188,72 @@ static int __fastcall PostDraw_Detour(void* thisPtr, void* edx)
 }
 
 // ---------------------------------------------------------------------------
+// HandleLButtonDown hook — left-click on map for location commands
+// ---------------------------------------------------------------------------
+
+static int __fastcall HandleLButtonDown_Detour(void* thisPtr, void* edx, const CXPoint& pos, uint32_t flags)
+{
+	__try
+	{
+		if (s_mapRenderEnabled && pLocalPlayer && GameState::GetGameState() == GAMESTATE_INGAME)
+		{
+			CVector3 worldCoords;
+			if (CallGetWorldCoordinates(thisPtr, worldCoords))
+			{
+				// Use player's Z since map click has no Z information
+				float playerZ = SpawnAccess::GetZ(pLocalPlayer);
+				MapClickLocation(worldCoords.X, worldCoords.Y, playerZ);
+			}
+		}
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER)
+	{
+		LogFramework("!!! HandleLButtonDown EXCEPTION code=0x%08X", GetExceptionCode());
+	}
+
+	return HandleLButtonDown_Original(thisPtr, edx, pos, flags);
+}
+
+// ---------------------------------------------------------------------------
+// HandleRButtonDown hook — right-click on map for targeting
+// ---------------------------------------------------------------------------
+
+static int __fastcall HandleRButtonDown_Detour(void* thisPtr, void* edx, const CXPoint& pos, uint32_t flags)
+{
+	// Guard: HandleRButtonDown may be inherited from CSidlScreenWnd base class,
+	// shared by many windows. Only process for our MapViewMap instance.
+	if (thisPtr != GetMapViewMapPtr())
+		return HandleRButtonDown_Original(thisPtr, edx, pos, flags);
+
+	__try
+	{
+		if (s_mapRenderEnabled && pLocalPlayer && GameState::GetGameState() == GAMESTATE_INGAME)
+		{
+			if (pCurrentMapLabel)
+			{
+				if (MapSelectTarget())
+					return 0;  // Handled — suppress default context menu
+			}
+		}
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER)
+	{
+		LogFramework("!!! HandleRButtonDown EXCEPTION code=0x%08X", GetExceptionCode());
+	}
+
+	return HandleRButtonDown_Original(thisPtr, edx, pos, flags);
+}
+
+// ---------------------------------------------------------------------------
 // MapMod implementation
 // ---------------------------------------------------------------------------
 
 bool MapMod::Initialize()
 {
-	LogFramework("MapMod::Initialize — setting up PostDraw hook");
+	LogFramework("MapMod::Initialize — setting up vtable hooks");
+
+	// Resolve game function pointers for map interactions
+	InitMapFunctions();
 
 	uintptr_t vtableAddr = eqlib::FixEQGameOffset(MapViewMap__vftable_x);
 
@@ -198,6 +267,25 @@ bool MapMod::Initialize()
 	Hooks::Install("MapViewMap_PostDraw",
 		reinterpret_cast<void**>(&PostDraw_Original),
 		reinterpret_cast<void*>(&PostDraw_Detour));
+
+	// HandleLButtonDown is vtable slot 14 (offset 0x38) — MapViewMap-specific
+	uintptr_t lbtnDownAddr = *reinterpret_cast<uintptr_t*>(vtableAddr + 0x38);
+	HandleLButtonDown_Original = reinterpret_cast<HandleLButtonDown_t>(lbtnDownAddr);
+	LogFramework("  HandleLButtonDown function = 0x%08X", static_cast<unsigned int>(lbtnDownAddr));
+
+	Hooks::Install("MapViewMap_HandleLButtonDown",
+		reinterpret_cast<void**>(&HandleLButtonDown_Original),
+		reinterpret_cast<void*>(&HandleLButtonDown_Detour));
+
+	// HandleRButtonDown is vtable slot 18 (offset 0x48) — may be inherited from
+	// CSidlScreenWnd, so the detour has a thisPtr guard.
+	uintptr_t rbtnDownAddr = *reinterpret_cast<uintptr_t*>(vtableAddr + 0x48);
+	HandleRButtonDown_Original = reinterpret_cast<HandleRButtonDown_t>(rbtnDownAddr);
+	LogFramework("  HandleRButtonDown function = 0x%08X", static_cast<unsigned int>(rbtnDownAddr));
+
+	Hooks::Install("MapViewMap_HandleRButtonDown",
+		reinterpret_cast<void**>(&HandleRButtonDown_Original),
+		reinterpret_cast<void*>(&HandleRButtonDown_Detour));
 
 	// Initialize map state (clears all circles)
 	MapInit();
@@ -231,8 +319,9 @@ bool MapMod::Initialize()
 	Commands::AddCommand("/mapnames", MapNames);
 	Commands::AddCommand("/mapclick", MapClickCommand);
 	Commands::AddCommand("/mapactivelayer", MapActiveLayerCmd);
+	Commands::AddCommand("/maploc", MapSetLocationCmd);
 
-	LogFramework("MapMod initialized (11 hooks + 7 commands)");
+	LogFramework("MapMod initialized (14 hooks + 8 commands)");
 	return true;
 }
 
@@ -248,6 +337,7 @@ void MapMod::Shutdown()
 	Commands::RemoveCommand("/mapnames");
 	Commands::RemoveCommand("/mapclick");
 	Commands::RemoveCommand("/mapactivelayer");
+	Commands::RemoveCommand("/maploc");
 
 	s_mapRenderEnabled = false;
 	MapClear();

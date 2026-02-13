@@ -1489,10 +1489,10 @@ void MapObjectMapLoc::UpdateMapObject()
 
 void InitDefaultMapLocParams()
 {
-	float lineSize = GetPrivateProfileFloat("MapLoc", "Size", 50.f, INIFileName);
+	float lineSize = GetPrivateProfileFloat("MapLoc", "Size", 10.f, INIFileName);
 	gDefaultMapLocParams.lineSize = lineSize;
 
-	float width = GetPrivateProfileFloat("MapLoc", "Width", 10.f, INIFileName);
+	float width = GetPrivateProfileFloat("MapLoc", "Width", 2.f, INIFileName);
 	gDefaultMapLocParams.width = width;
 
 	uint8_t r = static_cast<uint8_t>(GetPrivateProfileInt("MapLoc", "Red", 255, INIFileName));

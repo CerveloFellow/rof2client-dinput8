@@ -169,8 +169,8 @@ private:
 
 struct MapLocParams
 {
-	float   lineSize = 50.f;
-	float   width = 10.f;
+	float   lineSize = 10.f;
+	float   width = 2.f;
 	MQColor color = MQColor(255, 0, 0);
 	float   circleRadius = 0.f;
 	MQColor circleColor = MQColor(0, 0, 255);
