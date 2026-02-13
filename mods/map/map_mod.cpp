@@ -22,6 +22,7 @@
 
 #include <eqlib/Offsets.h>
 #include <eqlib/offsets/eqgame.h>
+#include <ctime>
 
 extern "C" uintptr_t EQGameBaseAddress;
 
@@ -255,7 +256,25 @@ void MapMod::Shutdown()
 
 void MapMod::OnPulse()
 {
-	// MapUpdate is called from PostDraw detour, not OnPulse
+	// MapUpdate is called from PostDraw detour, not OnPulse.
+	// But highlight pulse animation runs here on a timer.
+	if (HighlightPulse)
+	{
+		static clock_t s_lastPulse = clock();
+		clock_t now = clock();
+		if (now > s_lastPulse + 50)  // ~50ms interval
+		{
+			if (HighlightPulseIndex == 5 || HighlightPulseIndex == -5)
+				HighlightPulseIncreasing = !HighlightPulseIncreasing;
+
+			if (HighlightPulseIncreasing)
+				HighlightPulseIndex++;
+			else
+				HighlightPulseIndex--;
+
+			s_lastPulse = now;
+		}
+	}
 }
 
 bool MapMod::OnIncomingMessage(uint32_t /*opcode*/, const void* /*buffer*/, uint32_t /*size*/)
