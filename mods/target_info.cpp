@@ -9,7 +9,7 @@
  * Key differences from MQ2TargetInfo:
  * - Uses raw offset access instead of eqlib class headers
  * - GameCXStr wrapper for passing strings to game UI functions
- * - HandleBuffRemoveRequest hook captures pTargetWnd pointer
+ * - FindWindowByName scans CXWndManager to resolve pTargetWnd
  * - SEH protection on all game memory access
  */
 
@@ -29,6 +29,8 @@
 #include <cstdio>
 #include <cstring>
 #include <shellapi.h>
+
+// EQGameBaseAddress declared via EQLIB_VAR in eqlib/Offsets.h
 
 // ---------------------------------------------------------------------------
 // CXWnd offset constants (from eqlib CXWnd.h analysis)
@@ -102,42 +104,49 @@ constexpr uint32_t WSF_AUTOSTRETCHV   = 0x00800000;
 constexpr uint32_t WSF_RELATIVERECT   = 0x00200000;
 
 // ---------------------------------------------------------------------------
-// GameCXStr — minimal CXStr-compatible wrapper for game UI calls
+// CStrRep — game's string representation, allocated via eqAlloc.
 //
-// Allocates CStrRep via HeapAlloc with a high refcount so the game
-// never tries to free our allocations. This intentionally leaks ~64 bytes
-// per string creation. Since SetWindowText is called at most 2x/second
-// per label, the leak is bounded (~1MB/hour). Replace with proper CXStr
-// allocator integration for production use.
+// Uses the game's own heap allocator so CXStr functions (GetChildItem,
+// FindTemplate, etc.) can safely read, copy, and free our strings.
 // ---------------------------------------------------------------------------
 
-#pragma pack(push, 1)
-struct GameCXStrRep
+struct CStrRep_TI
 {
-    volatile long refCount;  // 0x00
-    uint32_t alloc;          // 0x04
-    uint32_t length;         // 0x08
-    int      encoding;       // 0x0C  (0 = UTF8)
-    void*    freeList;       // 0x10
-    // 0x14: string data follows (variable length)
+    int32_t  refCount;   // 0x00
+    uint32_t alloc;      // 0x04
+    uint32_t length;     // 0x08
+    int32_t  encoding;   // 0x0C  (0 = UTF8)
+    void*    freeList;   // 0x10
+    char     utf8[1];    // 0x14  variable-length string data
 };
-#pragma pack(pop)
+
+// Game allocator function pointers (resolved in Initialize)
+#define __eq_new_x     0x8DBB3B
+#define __eq_delete_x  0x8DB146
+
+using EqAllocFn = void*(*)(size_t);
+using EqFreeFn  = void(*)(void*);
+
+static EqAllocFn s_eqAlloc    = nullptr;
+static EqFreeFn  s_eqFree     = nullptr;
+static void*     s_gFreeLists = nullptr;
 
 static void* AllocGameStr(const char* text)
 {
+    if (!s_eqAlloc || !s_gFreeLists) return nullptr;
     if (!text) text = "";
     uint32_t len = (uint32_t)strlen(text);
-    uint32_t allocSize = sizeof(GameCXStrRep) + len + 1;
-    auto* rep = (GameCXStrRep*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, allocSize);
+    uint32_t bufAlloc = len + 16; // extra room
+    size_t allocSize = 0x14 + bufAlloc;
+    auto* rep = static_cast<CStrRep_TI*>(s_eqAlloc(allocSize));
     if (!rep) return nullptr;
-    rep->refCount = 1000000; // High refcount — never reaches 0, never freed by game
-    rep->alloc = len + 1;
-    rep->length = len;
-    rep->encoding = 0; // UTF8
-    rep->freeList = nullptr;
-    char* data = reinterpret_cast<char*>(rep) + 0x14;
-    memcpy(data, text, len);
-    data[len] = '\0';
+    memset(rep, 0, allocSize);
+    rep->refCount = 1;
+    rep->alloc    = bufAlloc;
+    rep->length   = len;
+    rep->encoding = 0;
+    rep->freeList = s_gFreeLists;
+    memcpy(rep->utf8, text, len + 1);
     return rep;
 }
 
@@ -176,12 +185,13 @@ static inline void WndWrite(void* pWnd, uintptr_t offset, T value)
 
 static void WndSetVisible(void* pWnd, bool vis)          { if (pWnd) WndWrite<uint8_t>(pWnd, WndOff::Visible, vis ? 1 : 0); }
 static bool WndIsVisible(void* pWnd)                     { return pWnd && WndRead<uint8_t>(pWnd, WndOff::Visible) != 0; }
-static void WndSetTopOffset(void* pWnd, int v)           { if (pWnd) WndWrite<int>(pWnd, WndOff::TopOffset, v); }
+// Offset setters — must set bClientRectChanged so EQ's layout engine recomputes Location
+static void WndSetTopOffset(void* pWnd, int v)           { if (pWnd) { WndWrite<int>(pWnd, WndOff::TopOffset, v); WndWrite<uint8_t>(pWnd, WndOff::ClientRectChanged, 1); WndWrite<uint8_t>(pWnd, WndOff::NeedsSaving, 1); } }
 static int  WndGetTopOffset(void* pWnd)                  { return pWnd ? WndRead<int>(pWnd, WndOff::TopOffset) : 0; }
-static void WndSetBottomOffset(void* pWnd, int v)        { if (pWnd) WndWrite<int>(pWnd, WndOff::BottomOffset, v); }
+static void WndSetBottomOffset(void* pWnd, int v)        { if (pWnd) { WndWrite<int>(pWnd, WndOff::BottomOffset, v); WndWrite<uint8_t>(pWnd, WndOff::ClientRectChanged, 1); WndWrite<uint8_t>(pWnd, WndOff::NeedsSaving, 1); } }
 static int  WndGetBottomOffset(void* pWnd)               { return pWnd ? WndRead<int>(pWnd, WndOff::BottomOffset) : 0; }
-static void WndSetLeftOffset(void* pWnd, int v)          { if (pWnd) WndWrite<int>(pWnd, WndOff::LeftOffset, v); }
-static void WndSetRightOffset(void* pWnd, int v)         { if (pWnd) WndWrite<int>(pWnd, WndOff::RightOffset, v); }
+static void WndSetLeftOffset(void* pWnd, int v)          { if (pWnd) { WndWrite<int>(pWnd, WndOff::LeftOffset, v); WndWrite<uint8_t>(pWnd, WndOff::ClientRectChanged, 1); WndWrite<uint8_t>(pWnd, WndOff::NeedsSaving, 1); } }
+static void WndSetRightOffset(void* pWnd, int v)         { if (pWnd) { WndWrite<int>(pWnd, WndOff::RightOffset, v); WndWrite<uint8_t>(pWnd, WndOff::ClientRectChanged, 1); WndWrite<uint8_t>(pWnd, WndOff::NeedsSaving, 1); } }
 static void WndSetCRNormal(void* pWnd, uint32_t c)       { if (pWnd) WndWrite<uint32_t>(pWnd, WndOff::CRNormal, c); }
 static void WndSetBGColor(void* pWnd, uint32_t c)        { if (pWnd) WndWrite<uint32_t>(pWnd, WndOff::BGColor, c); }
 static uint32_t WndGetWindowStyle(void* pWnd)             { return pWnd ? WndRead<uint32_t>(pWnd, WndOff::WindowStyle) : 0; }
@@ -217,7 +227,8 @@ static void LabelSetAlignCenter(void* pWnd, bool v)  { if (pWnd) WndWrite<uint8_
 // Game function pointers (resolved lazily)
 // ---------------------------------------------------------------------------
 
-// CSidlManagerBase::FindScreenPieceTemplate(const CXStr& name) — thiscall
+// CSidlManagerBase::FindScreenPieceTemplate(const CXStr& name) const — thiscall
+// NOTE: Must use FindScreenPieceTemplate1_x (CXStr overload), not FindScreenPieceTemplate_x (uint32_t overload)
 using FindScreenPieceTemplate_t = void*(__fastcall*)(void* thisPtr, void* edx, const void* pCXStr);
 static FindScreenPieceTemplate_t s_FindScreenPieceTemplate = nullptr;
 
@@ -225,13 +236,17 @@ static FindScreenPieceTemplate_t s_FindScreenPieceTemplate = nullptr;
 using CreateXWndFromTemplate_t = void*(__fastcall*)(void* thisPtr, void* edx, void* parent, void* tmpl);
 static CreateXWndFromTemplate_t s_CreateXWndFromTemplate = nullptr;
 
-// CSidlScreenWnd::GetChildItem(const CXStr& name) — thiscall
-using GetChildItem_t = void*(__fastcall*)(void* thisPtr, void* edx, const void* pCXStr);
+// CSidlScreenWnd::GetChildItem(const CXStr& name, bool bDebug) — thiscall
+using GetChildItem_t = void*(__fastcall*)(void* thisPtr, void* edx, const void* pCXStr, bool bDebug);
 static GetChildItem_t s_GetChildItem = nullptr;
 
 // CXWnd::Destroy() — thiscall, returns int
 using DestroyWnd_t = int(__fastcall*)(void* thisPtr, void* edx);
 static DestroyWnd_t s_DestroyWnd = nullptr;
+
+// CXWnd::Resize(int w, int h, bool bUpdateLayout, bool bCompleteMoveOrResize, bool bMoveChildren) — thiscall
+using CXWndResize_t = int(__fastcall*)(void* thisPtr, void* edx, int width, int height, bool bUpdateLayout, bool bCompleteMoveOrResize, bool bMoveChildren);
+static CXWndResize_t s_CXWndResize = nullptr;
 
 // CXWnd::SetWindowText(const CXStr&) — virtual at vtable index 73 (offset 0x124)
 // We call via vtable to ensure correct dispatch for CLabelWnd override.
@@ -276,6 +291,8 @@ static CanSee_t s_CanSee = nullptr;
 using HandleBuffRemoveRequest_t = void(__fastcall*)(void* thisPtr, void* edx, void* pWnd);
 static HandleBuffRemoveRequest_t s_HandleBuffRemoveRequest_Original = nullptr;
 
+// WndNotification hook removed — FindWindowByName is sufficient for pTargetWnd resolution.
+
 static bool s_funcPtrsResolved = false;
 
 static void ResolveTargetInfoFuncPtrs()
@@ -284,17 +301,30 @@ static void ResolveTargetInfoFuncPtrs()
     s_funcPtrsResolved = true;
 
     s_FindScreenPieceTemplate = reinterpret_cast<FindScreenPieceTemplate_t>(
-        eqlib::FixEQGameOffset(CSidlManagerBase__FindScreenPieceTemplate_x));
+        eqlib::FixEQGameOffset(CSidlManagerBase__FindScreenPieceTemplate1_x));
     s_CreateXWndFromTemplate = reinterpret_cast<CreateXWndFromTemplate_t>(
         eqlib::FixEQGameOffset(CSidlManagerBase__CreateXWndFromTemplate_x));
     s_GetChildItem = reinterpret_cast<GetChildItem_t>(
         eqlib::FixEQGameOffset(CSidlScreenWnd__GetChildItem_x));
     s_DestroyWnd = reinterpret_cast<DestroyWnd_t>(
         eqlib::FixEQGameOffset(CXWnd__Destroy_x));
+    s_CXWndResize = reinterpret_cast<CXWndResize_t>(
+        eqlib::FixEQGameOffset(CXWnd__Resize_x));
     s_CanSee = reinterpret_cast<CanSee_t>(
         eqlib::FixEQGameOffset(PlayerBase__CanSee_x));
     s_HandleBuffRemoveRequest_Original = reinterpret_cast<HandleBuffRemoveRequest_t>(
         eqlib::FixEQGameOffset(CTargetWnd__HandleBuffRemoveRequest_x));
+
+    // Game allocator — eqAlloc/eqFree for CXStr-safe memory management
+    uintptr_t eqAllocAddr = static_cast<uintptr_t>(__eq_new_x)
+        - eqlib::EQGamePreferredAddress + EQGameBaseAddress;
+    s_eqAlloc = reinterpret_cast<EqAllocFn>(eqAllocAddr);
+
+    uintptr_t eqFreeAddr = static_cast<uintptr_t>(__eq_delete_x)
+        - eqlib::EQGamePreferredAddress + EQGameBaseAddress;
+    s_eqFree = reinterpret_cast<EqFreeFn>(eqFreeAddr);
+
+    s_gFreeLists = reinterpret_cast<void*>(eqlib::FixEQGameOffset(CXStr__gFreeLists_x));
 
     LogFramework("TargetInfo func ptrs resolved:");
     LogFramework("  FindScreenPieceTemplate = 0x%08X", (unsigned)(uintptr_t)s_FindScreenPieceTemplate);
@@ -303,6 +333,9 @@ static void ResolveTargetInfoFuncPtrs()
     LogFramework("  DestroyWnd              = 0x%08X", (unsigned)(uintptr_t)s_DestroyWnd);
     LogFramework("  CanSee                  = 0x%08X", (unsigned)(uintptr_t)s_CanSee);
     LogFramework("  HandleBuffRemoveRequest = 0x%08X", (unsigned)(uintptr_t)s_HandleBuffRemoveRequest_Original);
+    LogFramework("  eqAlloc    = 0x%08X", (unsigned)eqAllocAddr);
+    LogFramework("  eqFree     = 0x%08X", (unsigned)eqFreeAddr);
+    LogFramework("  gFreeLists = 0x%08X", (unsigned)(uintptr_t)s_gFreeLists);
 }
 
 // Wrappers for resolved function pointers
@@ -316,7 +349,11 @@ static void* CallFindTemplate(const char* name)
         void* cxstr = rep;
         return s_FindScreenPieceTemplate(pSidlMgr, nullptr, &cxstr);
     }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        LogFramework("TargetInfo: SEH in CallFindTemplate('%s')", name);
+        return nullptr;
+    }
 }
 
 static void* CallCreateWndFromTemplate(void* parent, void* tmpl)
@@ -336,10 +373,15 @@ static void* CallGetChildItem(void* pWnd, const char* name)
     __try
     {
         void* rep = AllocGameStr(name);
+        if (!rep) return nullptr;
         void* cxstr = rep;
-        return s_GetChildItem(pWnd, nullptr, &cxstr);
+        return s_GetChildItem(pWnd, nullptr, &cxstr, false);
     }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        LogFramework("TargetInfo: SEH in CallGetChildItem('%s') code=0x%08X", name, GetExceptionCode());
+        return nullptr;
+    }
 }
 
 static void CallDestroyWnd(void* pWnd)
@@ -350,12 +392,71 @@ static void CallDestroyWnd(void* pWnd)
 }
 
 // ---------------------------------------------------------------------------
+// CXWndManager / CSidlScreenWnd layout constants for window-list walk
+// ---------------------------------------------------------------------------
+
+namespace WndMgrOff
+{
+    // CXWndManager + 0x04 = ArrayClass<CXWnd*> pWindows
+    // ArrayClass layout: +0x00 = m_length, +0x04 = m_array, +0x08 = m_alloc
+    constexpr uintptr_t pWindows_count = 0x04;  // int
+    constexpr uintptr_t pWindows_array = 0x08;  // CXWnd**
+}
+
+namespace SidlWndOff
+{
+    // CSidlScreenWnd::SidlText at +0x1DC (CXStr = pointer to CStrRep)
+    constexpr uintptr_t SidlText = 0x1DC;
+}
+
+// Walk CXWndManager's window list to find a CSidlScreenWnd by its SidlText name.
+// Returns nullptr if not found. Protected by SEH since not all windows in the
+// list are CSidlScreenWnd (reading SidlText on a plain CXWnd would be OOB).
+static void* FindWindowByName(const char* name)
+{
+    void* wndMgrPtr = reinterpret_cast<void*>(GameState::GetWndManager());
+    if (!wndMgrPtr) return nullptr;
+
+    __try
+    {
+        uintptr_t base = reinterpret_cast<uintptr_t>(wndMgrPtr);
+        int count = *reinterpret_cast<int*>(base + WndMgrOff::pWindows_count);
+        void** array = *reinterpret_cast<void***>(base + WndMgrOff::pWindows_array);
+
+        if (!array || count <= 0 || count > 50000) return nullptr;
+
+        for (int i = 0; i < count; i++)
+        {
+            void* pWnd = array[i];
+            if (!pWnd) continue;
+
+            // Try to read SidlText — will be garbage for non-CSidlScreenWnd
+            // windows, but exact string match makes false positives impossible.
+            __try
+            {
+                const char* sidlText = ReadCXStr(pWnd, SidlWndOff::SidlText);
+                if (sidlText && strcmp(sidlText, name) == 0)
+                    return pWnd;
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER) { /* skip this window */ }
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {}
+
+    return nullptr;
+}
+
+// ---------------------------------------------------------------------------
 // Module state (file-scope)
 // ---------------------------------------------------------------------------
 
-static void* s_pTargetWnd = nullptr;      // CTargetWnd* — captured from hook or scan
+static void* s_pTargetWnd = nullptr;      // CTargetWnd* — found by window name scan
 static bool  s_initialized = false;
 static bool  s_disabledBadUI = false;
+
+// Forward declarations
+static void CleanUpUI();
+static void InitUI();
 
 // UI overlay elements
 static void* s_pInfoLabel = nullptr;      // CLabelWnd*
@@ -394,8 +495,8 @@ static int s_targetInfoWindowStyle = 0;
 static int s_targetInfoAnchoredToRight = 0;
 static std::string s_manaLabelName = "Player_ManaLabel";
 static std::string s_fatigueLabelName = "Player_FatigueLabel";
-static std::string s_targetInfoLoc = "34,48,0,40";
-static std::string s_targetDistanceLoc = "34,48,90,0";
+static std::string s_targetInfoLoc = "38,48,55,90";
+static std::string s_targetDistanceLoc = "38,48,125,5";
 
 // PH database
 static std::recursive_mutex s_phMutex;
@@ -534,18 +635,11 @@ static bool GetPhMap(void* pSpawn, PHInfo* pInfo)
 }
 
 // ---------------------------------------------------------------------------
-// HandleBuffRemoveRequest detour — captures pTargetWnd and handles PH clicks
+// HandleBuffRemoveRequest detour — handles PH button clicks
 // ---------------------------------------------------------------------------
 
 static void __fastcall HandleBuffRemoveRequest_Detour(void* thisPtr, void* edx, void* pWnd)
 {
-    // Capture the target window pointer
-    if (!s_pTargetWnd)
-    {
-        s_pTargetWnd = thisPtr;
-        LogFramework("TargetInfo: Captured pTargetWnd = 0x%p from HandleBuffRemoveRequest", thisPtr);
-    }
-
     // Check if click was on our PH button
     if (s_pPHButton && pWnd == s_pPHButton)
     {
@@ -592,8 +686,8 @@ static void HandleINI(bool read, bool write)
 
         s_manaLabelName    = GetPrivateProfileString("UI", "Label1", "Player_ManaLabel", s_INIFileName);
         s_fatigueLabelName = GetPrivateProfileString("UI", "Label2", "Player_FatigueLabel", s_INIFileName);
-        s_targetDistanceLoc= GetPrivateProfileString("UI", "TargetDistanceLoc", "34,48,90,0", s_INIFileName);
-        s_targetInfoLoc    = GetPrivateProfileString("UI", "TargetInfoLoc", "34,48,0,40", s_INIFileName);
+        s_targetDistanceLoc= GetPrivateProfileString("UI", "TargetDistanceLoc", "38,48,125,5", s_INIFileName);
+        s_targetInfoLoc    = GetPrivateProfileString("UI", "TargetInfoLoc", "38,48,55,90", s_INIFileName);
     }
 
     if (write)
@@ -656,35 +750,41 @@ static void CMD_TargetInfo(SPAWNINFO* /*pChar*/, const char* szLine)
         GetArg(szArg, szLine, 2);
         s_showDistance = GetBoolFromString(szArg, !s_showDistance);
         writeIni = true;
+        WriteChatf("TargetInfo: distance %s", s_showDistance ? "ON" : "OFF");
     }
     else if (ci_equals(szArg, "info"))
     {
         GetArg(szArg, szLine, 2);
         s_showTargetInfo = GetBoolFromString(szArg, !s_showTargetInfo);
         writeIni = true;
+        WriteChatf("TargetInfo: info %s", s_showTargetInfo ? "ON" : "OFF");
     }
     else if (ci_equals(szArg, "placeholder"))
     {
         GetArg(szArg, szLine, 2);
         s_showPlaceholder = GetBoolFromString(szArg, !s_showPlaceholder);
         writeIni = true;
+        WriteChatf("TargetInfo: placeholder %s", s_showPlaceholder ? "ON" : "OFF");
     }
     else if (ci_equals(szArg, "anon"))
     {
         GetArg(szArg, szLine, 2);
         s_showAnon = GetBoolFromString(szArg, !s_showAnon);
         writeIni = true;
+        WriteChatf("TargetInfo: anon %s", s_showAnon ? "ON" : "OFF");
     }
     else if (ci_equals(szArg, "sight"))
     {
         GetArg(szArg, szLine, 2);
         s_showSight = GetBoolFromString(szArg, !s_showSight);
         writeIni = true;
+        WriteChatf("TargetInfo: sight %s", s_showSight ? "ON" : "OFF");
     }
     else if (ci_equals(szArg, "reload"))
     {
-        // Will re-init on next pulse
+        CleanUpUI();
         s_initialized = false;
+        WriteChatf("TargetInfo: reloading...");
     }
     else
     {
@@ -770,12 +870,16 @@ static void InitUI()
     if (s_disabledBadUI || !s_pTargetWnd) return;
     if (!pLocalPlayer) return;
 
+    LogFramework("TargetInfo: InitUI — reading INI");
     HandleINI(true, true);
 
+    LogFramework("TargetInfo: InitUI — entering __try");
     __try
     {
         // Modify target window style
+        LogFramework("TargetInfo: InitUI — reading window style");
         s_orgTargetWindStyle = WndGetWindowStyle(s_pTargetWnd);
+        LogFramework("TargetInfo: InitUI — style=0x%08X", s_orgTargetWindStyle);
         if (s_orgTargetWindStyle & WSF_TITLEBAR)
             WndAddStyle(s_pTargetWnd, WSF_SIZABLE | WSF_BORDER);
         else if (s_targetInfoWindowStyle == 0)
@@ -784,6 +888,7 @@ static void InitUI()
             WndSetWindowStyle(s_pTargetWnd, (uint32_t)s_targetInfoWindowStyle);
 
         // Move aggro labels down to make room for our overlays
+        LogFramework("TargetInfo: InitUI — getting child items");
         s_pAggroPctPlayerLabel = CallGetChildItem(s_pTargetWnd, "Target_AggroPctPlayerLabel");
         if (s_pAggroPctPlayerLabel)
         {
@@ -822,19 +927,26 @@ static void InitUI()
             WndSetTopOffset(s_pBuffWindow, s_buffWndTopOffset);
         }
 
-        // Find UI templates
+        // Find UI templates — distTmpl and canSeeTmpl are required;
+        // phBtnTmpl (IDW_ModButton) is MQ-specific and optional in stock EQ.
+        LogFramework("TargetInfo: InitUI — finding templates");
         void* distTmpl = CallFindTemplate(s_manaLabelName.c_str());
+        LogFramework("TargetInfo: InitUI — distTmpl=0x%p", distTmpl);
         void* canSeeTmpl = CallFindTemplate(s_fatigueLabelName.c_str());
+        LogFramework("TargetInfo: InitUI — canSeeTmpl=0x%p", canSeeTmpl);
         void* phBtnTmpl = CallFindTemplate("IDW_ModButton");
 
-        if (!distTmpl || !canSeeTmpl || !phBtnTmpl)
+        if (!distTmpl || !canSeeTmpl)
         {
             s_disabledBadUI = true;
-            WriteChatf("TargetInfo: Disabled due to incompatible UI (missing templates).");
-            LogFramework("TargetInfo: Missing templates - distTmpl=0x%p canSeeTmpl=0x%p phBtnTmpl=0x%p",
-                distTmpl, canSeeTmpl, phBtnTmpl);
+            WriteChatf("TargetInfo: Disabled due to incompatible UI (missing label templates).");
+            LogFramework("TargetInfo: Missing required templates - distTmpl=0x%p canSeeTmpl=0x%p",
+                distTmpl, canSeeTmpl);
             return;
         }
+
+        if (!phBtnTmpl)
+            LogFramework("TargetInfo: IDW_ModButton template not found — PH button disabled");
 
         // Save original template values
         uint32_t oldDistFont = WndRead<uint32_t>(distTmpl, TmplOff::nFont);
@@ -848,18 +960,21 @@ static void InitUI()
         void* oldCanSeeScreenId = WndRead<void*>(canSeeTmpl, TmplOff::strScreenId);
         void* oldCanSeeController = WndRead<void*>(canSeeTmpl, TmplOff::strController);
 
-        uint32_t oldPHFont = WndRead<uint32_t>(phBtnTmpl, TmplOff::nFont);
+        uint32_t oldPHFont = phBtnTmpl ? WndRead<uint32_t>(phBtnTmpl, TmplOff::nFont) : 0;
 
         // Modify templates for our labels
-        WndWrite<uint32_t>(distTmpl, TmplOff::nFont, 2);
+        WndWrite<uint32_t>(distTmpl, TmplOff::nFont, 1);
+        WndWrite<uint32_t>(distTmpl, TmplOff::uStyleBits, WSF_AUTOSTRETCHH | WSF_AUTOSTRETCHV | WSF_RELATIVERECT);
         WriteCXStr(distTmpl, TmplOff::strController, "0");
         WriteCXStr(canSeeTmpl, TmplOff::strController, "0");
 
         // --- Create InfoLabel ---
+        LogFramework("TargetInfo: InitUI — creating InfoLabel");
         WriteCXStr(distTmpl, TmplOff::strName, "Target_InfoLabel");
         WriteCXStr(distTmpl, TmplOff::strScreenId, "Target_InfoLabel");
 
         s_pInfoLabel = CallCreateWndFromTemplate(s_pTargetWnd, distTmpl);
+        LogFramework("TargetInfo: InitUI — InfoLabel=0x%p", s_pInfoLabel);
         if (s_pInfoLabel)
         {
             if (s_targetInfoAnchoredToRight)
@@ -874,7 +989,7 @@ static void InitUI()
             }
             WndSetVisible(s_pInfoLabel, true);
             WndSetUseInLayoutV(s_pInfoLabel, true);
-            WndSetWindowStyle(s_pInfoLabel, WSF_AUTOSTRETCHH | WSF_TRANSPARENT | WSF_AUTOSTRETCHV | WSF_RELATIVERECT);
+            WndSetWindowStyle(s_pInfoLabel, WSF_AUTOSTRETCHH | WSF_AUTOSTRETCHV | WSF_RELATIVERECT);
             WndSetClipToParent(s_pInfoLabel, true);
             WndSetUseInLayoutH(s_pInfoLabel, true);
             LabelSetAlignCenter(s_pInfoLabel, false);
@@ -887,16 +1002,18 @@ static void InitUI()
             WndSetRightOffset(s_pInfoLabel, r.right);
 
             WndSetCRNormal(s_pInfoLabel, 0xFF00FF00); // green
-            WndSetBGColor(s_pInfoLabel, 0xFFFFFFFF);
+            WndSetBGColor(s_pInfoLabel, 0x00000000); // transparent background
             WriteCXStr(s_pInfoLabel, WndOff::Tooltip, "Target Info");
         }
 
         // --- Create DistanceLabel ---
+        LogFramework("TargetInfo: InitUI — creating DistanceLabel");
         WriteCXStr(distTmpl, TmplOff::strName, "Target_DistLabel");
         WriteCXStr(distTmpl, TmplOff::strScreenId, "Target_DistLabel");
         WndWrite<uint32_t>(distTmpl, TmplOff::uStyleBits, WSF_AUTOSTRETCHH | WSF_AUTOSTRETCHV | WSF_RELATIVERECT);
 
         s_pDistanceLabel = CallCreateWndFromTemplate(s_pTargetWnd, distTmpl);
+        LogFramework("TargetInfo: InitUI — DistanceLabel=0x%p", s_pDistanceLabel);
         if (s_pDistanceLabel)
         {
             Rect4 r = ParseRect(s_targetDistanceLoc, 34, 48, 90, 0);
@@ -915,51 +1032,56 @@ static void InitUI()
         }
 
         // --- Create CanSeeLabel ---
-        WndWrite<uint32_t>(canSeeTmpl, TmplOff::nFont, 2);
+        LogFramework("TargetInfo: InitUI — creating CanSeeLabel");
+        WndWrite<uint32_t>(canSeeTmpl, TmplOff::nFont, 1);
         WriteCXStr(canSeeTmpl, TmplOff::strName, "Target_CanSeeLabel");
         WriteCXStr(canSeeTmpl, TmplOff::strScreenId, "Target_CanSeeLabel");
 
         s_pCanSeeLabel = CallCreateWndFromTemplate(s_pTargetWnd, canSeeTmpl);
+        LogFramework("TargetInfo: InitUI — CanSeeLabel=0x%p", s_pCanSeeLabel);
         if (s_pCanSeeLabel)
         {
             WndSetVisible(s_pCanSeeLabel, true);
             LabelSetNoWrap(s_pCanSeeLabel, true);
-            WndSetWindowStyle(s_pCanSeeLabel, WSF_AUTOSTRETCHH | WSF_TRANSPARENT | WSF_AUTOSTRETCHV | WSF_RELATIVERECT);
+            WndSetWindowStyle(s_pCanSeeLabel, WSF_AUTOSTRETCHH | WSF_AUTOSTRETCHV | WSF_RELATIVERECT);
             WndSetLeftAnchoredToLeft(s_pCanSeeLabel, true);
             WndSetRightAnchoredToLeft(s_pCanSeeLabel, false);
             WndSetBottomAnchoredToTop(s_pCanSeeLabel, true);
             WndSetTopAnchoredToTop(s_pCanSeeLabel, true);
             LabelSetAlignCenter(s_pCanSeeLabel, true);
             LabelSetAlignRight(s_pCanSeeLabel, false);
-            WndSetTopOffset(s_pCanSeeLabel, s_canSeeTopOffset + 10);
-            WndSetBottomOffset(s_pCanSeeLabel, s_canSeeBottomOffset + 10);
-            WndSetLeftOffset(s_pCanSeeLabel, s_dLeftOffset);
-            WndSetRightOffset(s_pCanSeeLabel, s_dLeftOffset);
+            WndSetTopOffset(s_pCanSeeLabel, s_canSeeTopOffset);
+            WndSetBottomOffset(s_pCanSeeLabel, s_canSeeBottomOffset);
+            WndSetLeftOffset(s_pCanSeeLabel, 93);
+            WndSetRightOffset(s_pCanSeeLabel, 93);
             WndSetCRNormal(s_pCanSeeLabel, 0xFF00FF00);
-            WndSetBGColor(s_pCanSeeLabel, 0xFFFFFFFF);
+            WndSetBGColor(s_pCanSeeLabel, 0x00000000); // transparent background
             WriteCXStr(s_pCanSeeLabel, WndOff::Tooltip, "Can See Target");
         }
 
-        // --- Create PHButton ---
-        WndWrite<uint32_t>(phBtnTmpl, TmplOff::nFont, 0);
-
-        s_pPHButton = CallCreateWndFromTemplate(s_pTargetWnd, phBtnTmpl);
-        if (s_pPHButton)
+        // --- Create PHButton (optional — IDW_ModButton is MQ-specific) ---
+        if (phBtnTmpl)
         {
-            WndSetVisible(s_pPHButton, false);
-            WndSetBottomAnchoredToTop(s_pPHButton, true);
-            WndSetLeftAnchoredToLeft(s_pPHButton, true);
-            WndSetRightAnchoredToLeft(s_pPHButton, false);
-            WndSetTopAnchoredToTop(s_pPHButton, true);
-            WndSetTopOffset(s_pPHButton, s_canSeeTopOffset + 1);
-            WndSetBottomOffset(s_pPHButton, s_dTopOffset - 1);
-            WndSetLeftOffset(s_pPHButton, 0);
-            WndSetRightOffset(s_pPHButton, 0);
-            WndSetLocation(s_pPHButton, 2, s_canSeeTopOffset + 1, 20, WndGetBottomOffset(s_pPHButton));
-            WndSetCRNormal(s_pPHButton, 0xFF00FFFF); // cyan
-            WndSetBGColor(s_pPHButton, 0xFFFFFFFF);
-            WriteCXStr(s_pPHButton, WndOff::Tooltip, "Target is a Place Holder");
-            CallSetWindowText(s_pPHButton, "PH");
+            WndWrite<uint32_t>(phBtnTmpl, TmplOff::nFont, 0);
+
+            s_pPHButton = CallCreateWndFromTemplate(s_pTargetWnd, phBtnTmpl);
+            if (s_pPHButton)
+            {
+                WndSetVisible(s_pPHButton, false);
+                WndSetBottomAnchoredToTop(s_pPHButton, true);
+                WndSetLeftAnchoredToLeft(s_pPHButton, true);
+                WndSetRightAnchoredToLeft(s_pPHButton, false);
+                WndSetTopAnchoredToTop(s_pPHButton, true);
+                WndSetTopOffset(s_pPHButton, s_canSeeTopOffset + 1);
+                WndSetBottomOffset(s_pPHButton, s_dTopOffset - 1);
+                WndSetLeftOffset(s_pPHButton, 0);
+                WndSetRightOffset(s_pPHButton, 0);
+                WndSetLocation(s_pPHButton, 2, s_canSeeTopOffset + 1, 20, WndGetBottomOffset(s_pPHButton));
+                WndSetCRNormal(s_pPHButton, 0xFF00FFFF); // cyan
+                WndSetBGColor(s_pPHButton, 0xFFFFFFFF);
+                WriteCXStr(s_pPHButton, WndOff::Tooltip, "Target is a Place Holder");
+                CallSetWindowText(s_pPHButton, "PH");
+            }
         }
 
         // Restore template values
@@ -972,17 +1094,34 @@ static void InitUI()
         WndWrite<void*>(canSeeTmpl, TmplOff::strName, oldCanSeeName);
         WndWrite<void*>(canSeeTmpl, TmplOff::strScreenId, oldCanSeeScreenId);
         WndWrite<void*>(canSeeTmpl, TmplOff::strController, oldCanSeeController);
-        WndWrite<uint32_t>(phBtnTmpl, TmplOff::nFont, oldPHFont);
+        if (phBtnTmpl)
+            WndWrite<uint32_t>(phBtnTmpl, TmplOff::nFont, oldPHFont);
 
-        if (!(s_pInfoLabel && s_pDistanceLabel && s_pCanSeeLabel && s_pPHButton))
+        if (!(s_pInfoLabel && s_pDistanceLabel && s_pCanSeeLabel))
         {
             WriteChatf("TargetInfo: Some UI elements failed to create. Try /targetinfo reload.");
-            LogFramework("TargetInfo: Partial init - Info=%p Dist=%p CanSee=%p PH=%p",
-                s_pInfoLabel, s_pDistanceLabel, s_pCanSeeLabel, s_pPHButton);
+            LogFramework("TargetInfo: Partial init - Info=%p Dist=%p CanSee=%p",
+                s_pInfoLabel, s_pDistanceLabel, s_pCanSeeLabel);
         }
 
         s_initialized = true;
-        LogFramework("TargetInfo: UI initialized successfully");
+
+        // Trigger parent resize for initial child visibility
+        if (s_CXWndResize)
+        {
+            uintptr_t locBase = reinterpret_cast<uintptr_t>(s_pTargetWnd) + WndOff::Location;
+            int* loc = reinterpret_cast<int*>(locBase);
+            int w = loc[2] - loc[0];
+            int h = loc[3] - loc[1];
+            if (w > 0 && h > 0)
+            {
+                s_CXWndResize(s_pTargetWnd, nullptr, w + 1, h, true, true, true);
+                s_CXWndResize(s_pTargetWnd, nullptr, w, h, true, true, true);
+            }
+        }
+
+        LogFramework("TargetInfo: UI initialized — Info=%p Dist=%p CanSee=%p PH=%p",
+            s_pInfoLabel, s_pDistanceLabel, s_pCanSeeLabel, s_pPHButton);
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
@@ -1010,7 +1149,7 @@ bool TargetInfoMod::Initialize()
     strcat_s(phPath, "TargetInfoPHs.txt");
     LoadPHs(phPath);
 
-    // Install HandleBuffRemoveRequest hook
+    // Install HandleBuffRemoveRequest hook — handles PH button clicks
     Hooks::Install("CTargetWnd_HandleBuffRemoveRequest",
         (void**)&s_HandleBuffRemoveRequest_Original,
         (void*)&HandleBuffRemoveRequest_Detour);
@@ -1042,34 +1181,152 @@ void TargetInfoMod::OnReloadUI()
 void TargetInfoMod::OnSetGameState(int gameState)
 {
     if (gameState == GAMESTATE_INGAME)
+    {
+        CleanUpUI();
         s_initialized = false; // Will re-init on next pulse
+    }
 }
+
+// CXWnd rendering rect offsets
+namespace WndOff2
+{
+    constexpr uintptr_t ScreenClipRectChanged = 0x022;
+    constexpr uintptr_t ClientClipRectChanged = 0x038;
+    constexpr uintptr_t ClipRectScreen        = 0x088; // CXRect
+    constexpr uintptr_t ClipRectClient        = 0x0A8; // CXRect
+    constexpr uintptr_t ClientRect            = 0x1B4; // CXRect
+}
+
+// Call CXWnd::Move (vtable 72) — properly updates internal rendering state
+static void CallMove(void* pWnd, int x, int y)
+{
+    if (!pWnd) return;
+    __try
+    {
+        void** vtable = *reinterpret_cast<void***>(pWnd);
+        using Fn = int(__fastcall*)(void*, void*, const int*);
+        auto fn = reinterpret_cast<Fn>(vtable[72]); // Move
+        int point[2] = { x, y };
+        fn(pWnd, nullptr, point);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+
+// Position a child window using Move+Resize (EQ's own APIs).
+// Direct rect writes get overwritten by EQ's render pass; these APIs properly
+// update internal rendering state.
+static void PositionChild(void* pChild, int left, int top, int width, int height)
+{
+    if (!pChild || !s_CXWndResize) return;
+    CallMove(pChild, left, top);
+    s_CXWndResize(pChild, nullptr, width, height, false, false, false);
+}
+
+// Get parent's current screen rect
+static bool GetParentRect(int& pL, int& pT, int& pR, int& pB)
+{
+    if (!s_pTargetWnd) return false;
+    uintptr_t pBase = reinterpret_cast<uintptr_t>(s_pTargetWnd) + WndOff::Location;
+    pL = reinterpret_cast<int*>(pBase)[0];
+    pT = reinterpret_cast<int*>(pBase)[1];
+    pR = reinterpret_cast<int*>(pBase)[2];
+    pB = reinterpret_cast<int*>(pBase)[3];
+    return (pL != 0 || pT != 0 || pR != 0 || pB != 0);
+}
+
+// Compute and apply child position from offsets/anchors via Move+Resize
+static void ComputeChildRect(void* pChild)
+{
+    int pL, pT, pR, pB;
+    if (!pChild || !GetParentRect(pL, pT, pR, pB)) return;
+
+    int topOff    = WndRead<int>(pChild, WndOff::TopOffset);
+    int bottomOff = WndRead<int>(pChild, WndOff::BottomOffset);
+    int leftOff   = WndRead<int>(pChild, WndOff::LeftOffset);
+    int rightOff  = WndRead<int>(pChild, WndOff::RightOffset);
+
+    bool topAnchTop    = WndRead<uint8_t>(pChild, WndOff::TopAnchoredToTop) != 0;
+    bool botAnchTop    = WndRead<uint8_t>(pChild, WndOff::BottomAnchoredToTop) != 0;
+    bool leftAnchLeft  = WndRead<uint8_t>(pChild, WndOff::LeftAnchoredToLeft) != 0;
+    bool rightAnchLeft = WndRead<uint8_t>(pChild, WndOff::RightAnchoredToLeft) != 0;
+
+    int cL = leftAnchLeft  ? (pL + leftOff)   : (pR + leftOff);
+    int cT = topAnchTop    ? (pT + topOff)    : (pB + topOff);
+    int cR = rightAnchLeft ? (pL + rightOff)  : (pR - rightOff);
+    int cB = botAnchTop    ? (pT + bottomOff) : (pB - bottomOff);
+
+    PositionChild(pChild, cL, cT, cR - cL, cB - cT);
+}
+
+// Fixed-width rect for CanSee indicator, offset from center
+static void ComputeCanSeeRect(void* pChild, int horizOffset = 0)
+{
+    int pL, pT, pR, pB;
+    if (!pChild || !GetParentRect(pL, pT, pR, pB)) return;
+
+    int topOff    = WndRead<int>(pChild, WndOff::TopOffset);
+    int bottomOff = WndRead<int>(pChild, WndOff::BottomOffset);
+
+    int centerX = (pL + pR) / 2 + horizOffset;
+    int cL = centerX - 8;
+    int cT = pT + topOff;
+    int h = bottomOff - topOff;
+
+    PositionChild(pChild, cL, cT, 16, h > 0 ? h : 14);
+}
+
+// Fixed alignment values (determined via iterative testing)
+static const int s_fixedInfoLeft = 15;
+static const int s_fixedTop = 42;
+static const int s_fixedBottom = 58;
+static const int s_fixedDistRight = 25;
+static const int s_fixedCanSeeHoriz = 20; // pixels right of center
 
 // Extracted update logic — contains C++ objects (PHInfo has std::string members)
 // so it cannot live inside a __try block directly.
 static void UpdateTargetOverlays(void* pTarg)
 {
-    // --- Placeholder button ---
-    if (s_showPlaceholder)
+    // Apply fixed alignment offsets every frame
+    WndWrite<int>(s_pInfoLabel, WndOff::LeftOffset, s_fixedInfoLeft);
+    WndWrite<int>(s_pInfoLabel, WndOff::TopOffset, s_fixedTop);
+    WndWrite<int>(s_pInfoLabel, WndOff::BottomOffset, s_fixedBottom);
+    WndWrite<int>(s_pDistanceLabel, WndOff::TopOffset, s_fixedTop);
+    WndWrite<int>(s_pDistanceLabel, WndOff::BottomOffset, s_fixedBottom);
+    WndWrite<int>(s_pDistanceLabel, WndOff::RightOffset, s_fixedDistRight);
+    WndWrite<int>(s_pCanSeeLabel, WndOff::TopOffset, s_fixedTop);
+    WndWrite<int>(s_pCanSeeLabel, WndOff::BottomOffset, s_fixedBottom);
+
+    // Update Location rects from parent — EQ's layout engine doesn't always
+    // recompute for dynamically-added children.
+    ComputeChildRect(s_pInfoLabel);
+    ComputeChildRect(s_pDistanceLabel);
+    ComputeCanSeeRect(s_pCanSeeLabel, s_fixedCanSeeHoriz);
+    ComputeChildRect(s_pPHButton);
+
+    // --- Placeholder button (optional — only exists if IDW_ModButton template was found) ---
+    if (s_pPHButton)
     {
-        if (s_oldSpawn != pTarg)
+        if (s_showPlaceholder)
         {
-            s_oldSpawn = pTarg;
-            PHInfo pinf;
-            if (GetPhMap(pTarg, &pinf))
+            if (s_oldSpawn != pTarg)
             {
-                WriteCXStr(s_pPHButton, WndOff::Tooltip, pinf.Named.c_str());
-                WndSetVisible(s_pPHButton, true);
-            }
-            else
-            {
-                WndSetVisible(s_pPHButton, false);
+                s_oldSpawn = pTarg;
+                PHInfo pinf;
+                if (GetPhMap(pTarg, &pinf))
+                {
+                    WriteCXStr(s_pPHButton, WndOff::Tooltip, pinf.Named.c_str());
+                    WndSetVisible(s_pPHButton, true);
+                }
+                else
+                {
+                    WndSetVisible(s_pPHButton, false);
+                }
             }
         }
-    }
-    else
-    {
-        WndSetVisible(s_pPHButton, false);
+        else
+        {
+            WndSetVisible(s_pPHButton, false);
+        }
     }
 
     // --- Target info label (level/race/class or anon) ---
@@ -1110,6 +1367,7 @@ static void UpdateTargetOverlays(void* pTarg)
     if (s_showDistance)
     {
         float dist = Distance3DToSpawn((void*)pLocalPlayer, pTarg);
+
         sprintf_s(szText, "%.2f", dist);
 
         if (dist < 250.0f)
@@ -1163,15 +1421,14 @@ void TargetInfoMod::OnPulse()
         return;
     lastUpdate = now;
 
-    // Try to find pTargetWnd if we don't have it yet
-    // (HandleBuffRemoveRequest hook will capture it on first click,
-    //  but we also try scanning here)
+    // Find pTargetWnd by walking CXWndManager's window list
     if (!s_pTargetWnd)
     {
-        // TODO: Implement window manager scan as fallback.
-        // For now, we rely on the HandleBuffRemoveRequest hook.
-        // The user must click the target window once to activate the mod.
-        return;
+        s_pTargetWnd = FindWindowByName("TargetWindow");
+        if (s_pTargetWnd)
+            LogFramework("TargetInfo: Found pTargetWnd = 0x%p via window list scan", s_pTargetWnd);
+        else
+            return;
     }
 
     if (!WndIsVisible(s_pTargetWnd))
@@ -1180,7 +1437,7 @@ void TargetInfoMod::OnPulse()
     // Lazy-init UI on first visible pulse
     InitUI();
 
-    if (!s_pInfoLabel || !s_pDistanceLabel || !s_pCanSeeLabel || !s_pPHButton)
+    if (!s_pInfoLabel || !s_pDistanceLabel || !s_pCanSeeLabel)
         return;
 
     void* pTarg = (void*)pTarget;
@@ -1195,7 +1452,7 @@ void TargetInfoMod::OnPulse()
         CallSetWindowText(s_pInfoLabel, "");
         CallSetWindowText(s_pDistanceLabel, "");
         CallSetWindowText(s_pCanSeeLabel, "");
-        WndSetVisible(s_pPHButton, false);
+        if (s_pPHButton) WndSetVisible(s_pPHButton, false);
     }
 }
 
